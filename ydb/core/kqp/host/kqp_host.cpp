@@ -33,6 +33,7 @@
 #include <yt/yql/providers/yt/provider/yql_yt_provider.h>
 #include <ydb/library/yql/providers/dq/helper/yql_dq_helper_impl.h>
 #include <yql/essentials/minikql/invoke_builtins/mkql_builtins.h>
+#include <ydb/library/actors/core/log.h>
 
 #include <library/cpp/cache/cache.h>
 #include <library/cpp/random_provider/random_provider.h>
@@ -238,6 +239,11 @@ public:
         validateResult.SqlVersion = SqlVersion;
         validateResult.AllowCache = KeepInCache;
         validateResult.CommandTagName = CommandTagName;
+        auto exprRoot = GetExprRoot();
+        // if (exprRoot) {
+        //     auto fillSettings = NCommon::GetFillSettings(*exprRoot);
+        //     validateResult.DiscardResults = fillSettings.Discard;
+        // }
     }
 
 private:
@@ -288,6 +294,11 @@ public:
         queryResult.SqlVersion = SqlVersion;
         queryResult.AllowCache = KeepInCache;
         queryResult.CommandTagName = CommandTagName;
+        auto exprRoot = GetExprRoot();
+        // if (exprRoot) {
+        //     auto fillSettings = NCommon::GetFillSettings(*exprRoot);
+        //     queryResult.DiscardResults = fillSettings.Discard;
+        // }
     }
 
 private:
@@ -350,6 +361,11 @@ public:
         queryResult.QueryPlan = SerializeScriptPlan(queryPlans);
         queryResult.AllowCache = KeepInCache;
         queryResult.CommandTagName = CommandTagName;
+        // auto exprRoot = GetExprRoot();
+        // if (exprRoot) {
+        //     auto fillSettings = NCommon::GetFillSettings(*exprRoot);
+        //     queryResult.DiscardResults = fillSettings.Discard;
+        // }
     }
 
 private:
@@ -385,6 +401,11 @@ public:
         queryResult.QueryPlan = queryResult.PreparingQuery->GetPhysicalQuery().GetQueryPlan();
 
         FillColumnMeta(queryResult.PreparingQuery->GetPhysicalQuery(), queryResult);
+        // auto exprRoot = GetExprRoot();
+        // if (exprRoot) {
+        //     auto fillSettings = NCommon::GetFillSettings(*exprRoot);
+        //     queryResult.DiscardResults = fillSettings.Discard;
+        // }
     }
 
 private:
@@ -441,6 +462,11 @@ public:
         prepareResult.NeedToSplit = false;
         prepareResult.AllowCache = KeepInCache;
         prepareResult.CommandTagName = CommandTagName;
+        auto exprRoot = GetExprRoot();
+        if (exprRoot) {
+            auto fillSettings = NCommon::GetFillSettings(*exprRoot);
+            prepareResult.DiscardResults = fillSettings.Discard;
+        }
     }
 
 private:
@@ -840,10 +866,10 @@ public:
         TExprContext& ctx, const TExecuteSettings& settings) override
     {
         auto queryType = SessionCtx->Query().Type;
-
         YQL_ENSURE(!settings.UseScanQuery ||
                    queryType == EKikimrQueryType::YqlScript ||
                    queryType == EKikimrQueryType::YqlScriptStreaming);
+    //    LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_YQL, "start execute bebe: " << query->Content());
 
         if (SessionCtx->Query().PrepareOnly) {
             switch (queryType) {
@@ -862,6 +888,8 @@ public:
                     return nullptr;
             }
         }
+        IDataProvider::TFillSettings fillSettings = NCommon::GetFillSettings(*query);
+        LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_YQL, "start execute: " << query->Content() << ", discard: " << fillSettings.Discard);
 
         switch (queryType) {
             case EKikimrQueryType::YqlScript:
@@ -880,6 +908,9 @@ public:
                 querySettings.CollectStats = GetStatsMode(settings.StatsMode);
 
                 TFuture<TQueryResult> future;
+                IDataProvider::TFillSettings settings = NCommon::GetFillSettings(*query);
+                LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_YQL, "ExecuteDataQuery discard flag: " << settings.Discard);
+
                 switch (queryType) {
                 case EKikimrQueryType::YqlScript:
                     if (useGenericQuery) {
@@ -889,7 +920,7 @@ public:
                             future = Gateway->ExplainGenericQuery(Cluster, SessionCtx->Query().PreparingQuery->GetText());
                         } else {
                             future = Gateway->ExecGenericQuery(Cluster, SessionCtx->Query().PreparingQuery->GetText(), CollectParameters(query),
-                                querySettings, txSettings, traceId);
+                                querySettings, txSettings, traceId, settings.Discard);
                         }
                     } else if (useScanQuery) {
                         ui64 rowsLimit = 0;
@@ -902,7 +933,7 @@ public:
                             future = Gateway->ExplainScanQueryAst(Cluster, queryAstStr);
                         } else {
                             future = Gateway->ExecScanQueryAst(Cluster, queryAstStr, CollectParameters(query),
-                                querySettings, rowsLimit);
+                                querySettings, rowsLimit, settings.Discard);
                         }
                     } else {
                         Ydb::Table::TransactionSettings txSettings;
@@ -911,7 +942,7 @@ public:
                             future = Gateway->ExplainDataQueryAst(Cluster, queryAstStr);
                         } else {
                             future = Gateway->ExecDataQueryAst(Cluster, queryAstStr, CollectParameters(query),
-                                querySettings, txSettings, traceId);
+                                querySettings, txSettings, traceId, settings.Discard);
                         }
                     }
                     break;
@@ -921,16 +952,16 @@ public:
                         txSettings.mutable_serializable_read_write();
 
                         future = Gateway->StreamExecGenericQuery(Cluster, SessionCtx->Query().PreparingQuery->GetText(), CollectParameters(query),
-                                querySettings, txSettings, SessionCtx->Query().ReplyTarget, traceId);
+                                querySettings, txSettings, SessionCtx->Query().ReplyTarget, traceId, settings.Discard);
                     } else if (useScanQuery) {
                         future = Gateway->StreamExecScanQueryAst(Cluster, queryAstStr, CollectParameters(query),
-                            querySettings, SessionCtx->Query().ReplyTarget, SessionCtx->Query().RpcCtx);
+                            querySettings, SessionCtx->Query().ReplyTarget, SessionCtx->Query().RpcCtx, settings.Discard);
                     } else {
                         Ydb::Table::TransactionSettings txSettings;
                         txSettings.mutable_serializable_read_write();
 
                         future = Gateway->StreamExecDataQueryAst(Cluster, queryAstStr, CollectParameters(query),
-                            querySettings, txSettings, SessionCtx->Query().ReplyTarget, traceId);
+                            querySettings, txSettings, SessionCtx->Query().ReplyTarget, traceId, settings.Discard);
                     }
                     break;
 
@@ -1470,7 +1501,7 @@ private:
         if (!compileResult.QueryExpr) {
             return nullptr;
         }
-
+        // auto fillSettings = NCommon::GetFillSettings(*compileResult.QueryExpr);
         if (SessionCtx->Config().EnableNewRBO) {
             return MakeIntrusive<TAsyncPrepareYqlResult>(compileResult.QueryExpr.Get(), ctx, *YqlTransformerNewRBO, SessionCtx->QueryPtr(),
                 query.Text, sqlVersion, TransformCtx, compileResult.KeepInCache, compileResult.CommandTagName, DataProvidersFinalizer);

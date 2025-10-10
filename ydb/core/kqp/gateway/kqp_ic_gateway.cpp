@@ -1916,7 +1916,7 @@ public:
     }
 
     TFuture<TQueryResult> ExecScanQueryAst(const TString& cluster, const TString& query,
-        TQueryData::TPtr params, const TAstQuerySettings& settings, ui64 rowsLimit) override
+        TQueryData::TPtr params, const TAstQuerySettings& settings, ui64 rowsLimit, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
 
@@ -1938,8 +1938,9 @@ public:
         FillParameters(params, ev->Record.MutableRequest()->MutableYdbParameters());
 
         return SendKqpScanQueryRequest(ev.Release(), rowsLimit,
-            [] (TPromise<TQueryResult> promise, TResponse&& responseEv) {
+            [discardResults] (TPromise<TQueryResult> promise, TResponse&& responseEv) {
                 TQueryResult queryResult;
+                queryResult.DiscardResults = discardResults;
                 KqpResponseToQueryResult(responseEv.Record, queryResult);
                 promise.SetValue(std::move(queryResult));
             });
@@ -1948,7 +1949,7 @@ public:
     TFuture<TQueryResult> StreamExecDataQueryAst(const TString& cluster, const TString& query,
         TQueryData::TPtr params, const TAstQuerySettings& settings,
         const Ydb::Table::TransactionSettings& txSettings, const NActors::TActorId& target,
-        const TMaybe<TString>& traceId) override
+        const TMaybe<TString>& traceId, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
 
@@ -1978,8 +1979,9 @@ public:
         txControl.set_commit_tx(true);
 
         return SendKqpStreamRequest<TRequest, TResponse, TQueryResult>(ev.Release(), target,
-            [](TPromise<TQueryResult> promise, TResponse&& responseEv) {
+            [discardResults](TPromise<TQueryResult> promise, TResponse&& responseEv) {
             TQueryResult queryResult;
+            queryResult.DiscardResults = discardResults;
             KqpResponseToQueryResult(responseEv.Record, queryResult);
             promise.SetValue(std::move(queryResult));
         });
@@ -1987,7 +1989,7 @@ public:
 
     TFuture<TQueryResult> StreamExecScanQueryAst(const TString& cluster, const TString& query,
         TQueryData::TPtr params, const TAstQuerySettings& settings, const NActors::TActorId& target,
-        std::shared_ptr<NGRpcService::IRequestCtxMtSafe> ctx) override
+        std::shared_ptr<NGRpcService::IRequestCtxMtSafe> ctx, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
         YQL_ENSURE(ctx);
@@ -2014,8 +2016,9 @@ public:
         FillParameters(std::move(params), ev->Record.MutableRequest()->MutableYdbParameters());
 
         return SendKqpQueryStreamRequest(ev.Release(), target,
-            [](TPromise<TQueryResult> promise, TResponse&& responseEv) {
+            [discardResults](TPromise<TQueryResult> promise, TResponse&& responseEv) {
             TQueryResult queryResult;
+            queryResult.DiscardResults = discardResults;
             KqpResponseToQueryResult(responseEv.Record, queryResult);
             promise.SetValue(std::move(queryResult));
         });
@@ -2049,7 +2052,7 @@ public:
 
     TFuture<TQueryResult> ExecDataQueryAst(const TString& cluster, const TString& query, TQueryData::TPtr params,
         const TAstQuerySettings& settings, const Ydb::Table::TransactionSettings& txSettings,
-        const TMaybe<TString>& traceId) override
+        const TMaybe<TString>& traceId, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
 
@@ -2079,8 +2082,9 @@ public:
         txControl.set_commit_tx(true);
 
         return SendKqpRequest<TRequest, TResponse, TQueryResult>(ev.Release(),
-            [] (TPromise<TQueryResult> promise, TResponse&& responseEv) {
+            [discardResults] (TPromise<TQueryResult> promise, TResponse&& responseEv) {
                 TQueryResult queryResult;
+                queryResult.DiscardResults = discardResults;
                 KqpResponseToQueryResult(responseEv.Record, queryResult);
                 promise.SetValue(std::move(queryResult));
             });
@@ -2127,7 +2131,7 @@ public:
 
     TFuture<TQueryResult> ExecGenericQuery(const TString& cluster, const TString& query, TQueryData::TPtr params,
         const TAstQuerySettings& settings, const Ydb::Table::TransactionSettings& txSettings,
-        const TMaybe<TString>& traceId) override
+        const TMaybe<TString>& traceId, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
 
@@ -2146,7 +2150,7 @@ public:
         txControl.mutable_begin_tx()->CopyFrom(txSettings);
         txControl.set_commit_tx(true);
 
-        return RunGenericQuery(query, NKikimrKqp::QUERY_ACTION_EXECUTE, std::move(ev));
+        return RunGenericQuery(query, NKikimrKqp::QUERY_ACTION_EXECUTE, std::move(ev), discardResults);
     }
 
     TFuture<TQueryResult> ExplainGenericQuery(const TString& cluster, const TString& query) override {
@@ -2158,7 +2162,7 @@ public:
     TFuture<TQueryResult> StreamExecGenericQuery(const TString& cluster, const TString& query,
         TQueryData::TPtr params, const TAstQuerySettings& settings,
         const Ydb::Table::TransactionSettings& txSettings, const NActors::TActorId& target,
-        const TMaybe<TString>& traceId) override
+        const TMaybe<TString>& traceId, bool discardResults = false) override
     {
         YQL_ENSURE(cluster == Cluster);
 
@@ -2188,8 +2192,9 @@ public:
         txControl.set_commit_tx(true);
 
         return SendKqpQueryStreamRequest(ev.Release(), target,
-            [](TPromise<TQueryResult> promise, TResponse&& responseEv) {
+            [discardResults](TPromise<TQueryResult> promise, TResponse&& responseEv) {
             TQueryResult queryResult;
+            queryResult.DiscardResults = discardResults;
             KqpResponseToQueryResult(responseEv.Record, queryResult);
             promise.SetValue(std::move(queryResult));
         });
@@ -2307,7 +2312,7 @@ private:
         });
     }
 
-    TFuture<TQueryResult> RunGenericQuery(const TString& query, NKikimrKqp::EQueryAction action, THolder<TEvKqp::TEvQueryRequest> ev) {
+    TFuture<TQueryResult> RunGenericQuery(const TString& query, NKikimrKqp::EQueryAction action, THolder<TEvKqp::TEvQueryRequest> ev, bool discardResults = false) {
         if (UserToken) {
             ev->Record.SetUserToken(UserToken->GetSerializedToken());
         }
@@ -2320,8 +2325,9 @@ private:
         request.SetKeepSession(false);
 
         return SendKqpGenericQueryRequest(ev.Release(), QueryServiceConfig.GetScriptResultRowsLimit(), QueryServiceConfig.GetScriptResultSizeLimit(),
-            [] (TPromise<TQueryResult> promise, TEvKqp::TEvQueryResponse&& responseEv) {
+            [discardResults] (TPromise<TQueryResult> promise, TEvKqp::TEvQueryResponse&& responseEv) {
                 TQueryResult queryResult;
+                queryResult.DiscardResults = discardResults;
                 KqpResponseToQueryResult(responseEv.Record, queryResult);
                 promise.SetValue(std::move(queryResult));
             });

@@ -135,6 +135,14 @@ public:
         return RequestCtx ? OperationTimeout : TDuration::MilliSeconds(Record.GetRequest().GetTimeoutMs());
     }
 
+    bool GetDiscardResults() const {
+        return RequestCtx ? DiscardResults : false;
+    }
+
+    void SetDiscardResults(bool discardResults) {
+        DiscardResults = discardResults;
+    }
+
     bool HasAction() const {
         return RequestCtx ? true : Record.GetRequest().HasAction();
     }
@@ -462,6 +470,7 @@ private:
     std::shared_ptr<const NKikimrKqp::TQueryPhysicalGraph> QueryPhysicalGraph;
     i64 Generation = 0;
     bool DisableDefaultTimeout = false;
+    bool DiscardResults = false;
 };
 
 struct TEvDataQueryStreamPart: public TEventPB<TEvDataQueryStreamPart,

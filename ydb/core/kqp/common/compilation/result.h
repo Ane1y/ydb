@@ -59,6 +59,7 @@ struct TKqpCompileResult {
     bool AllowCache = true;
     TMaybe<TQueryAst> QueryAst;
     bool NeedToSplit = false;
+    bool DiscardResult = false;
     TMaybe<TString> CommandTagName = {};
 
     TMaybe<TString> ReplayMessageUserView;

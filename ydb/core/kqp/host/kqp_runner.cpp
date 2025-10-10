@@ -243,7 +243,6 @@ private:
         const IKikimrQueryExecutor::TExecuteSettings& settings)
     {
         CreateGraphTransformer(&TypesCtx, SessionCtx, FunctionRegistry);
-
         YQL_ENSURE(cluster == Cluster);
         YQL_ENSURE(!settings.CommitTx);
         YQL_ENSURE(!settings.RollbackTx);

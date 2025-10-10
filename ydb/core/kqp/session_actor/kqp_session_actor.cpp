@@ -1661,6 +1661,7 @@ public:
         request.ResourceManager_ = ResourceManager_;
         request.SaveQueryPhysicalGraph = QueryState && QueryState->SaveQueryPhysicalGraph && request.Transactions.size() == 1 && !isRollback;
         request.QueryPhysicalGraph = QueryState && !isRollback ? QueryState->QueryPhysicalGraph : nullptr;
+        // request.DiscardResult = QueryState && QueryState->DiscardResults;
         LOG_D("Sending to Executer TraceId: " << request.TraceId.GetTraceId() << " " << request.TraceId.GetSpanIdSize());
 
         if (txCtx->EnableOltpSink.value_or(false) && !txCtx->TxManager) {
@@ -2326,7 +2327,7 @@ public:
 
         // Result for scan query is sent directly to target actor.
         Y_ABORT_UNLESS(response->GetArena());
-        if (QueryState->PreparedQuery) {
+        if (QueryState->PreparedQuery && !QueryState->CompileResult->DiscardResult) {
             auto& phyQuery = QueryState->PreparedQuery->GetPhysicalQuery();
             size_t trailingResultsCount = 0;
             for (size_t i = 0; i < phyQuery.ResultBindingsSize(); ++i) {

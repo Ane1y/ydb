@@ -518,14 +518,13 @@ private:
             Continue(ctx);
             return;
         }
-
         auto kqpResult = std::move(AsyncCompileResult->GetResult());
         auto status = GetYdbStatus(kqpResult);
         auto meta = CollectMeta();
 
         if (kqpResult.NeedToSplit) {
-            KqpCompileResult = TKqpCompileResult::Make(
-                Uid, status, kqpResult.Issues(), ETableReadType::Other, CompileCpuTime, std::move(QueryId), std::move(QueryAst), meta, true);
+            KqpCompileResult = TKqpCompileResult::Make(Uid, status, kqpResult.Issues(), ETableReadType::Other, CompileCpuTime, std::move(QueryId), std::move(QueryAst), meta, true);
+            KqpCompileResult->DiscardResult = kqpResult.DiscardResults;
             Reply();
             return;
         }
@@ -542,8 +541,10 @@ private:
         ETableReadType maxReadType = ExtractMostHeavyReadType(kqpResult.QueryPlan);
 
         auto queryType = QueryId.Settings.QueryType;
-
-        KqpCompileResult = TKqpCompileResult::Make(Uid, status, kqpResult.Issues(), maxReadType, CompileCpuTime, std::move(QueryId), std::move(QueryAst), meta);
+        LOG_DEBUG_S(ctx, NKikimrServices::KQP_COMPILE_ACTOR, "For query " << QueryId.Text << " discard flag: " << kqpResult.DiscardResults);
+        KqpCompileResult = TKqpCompileResult::Make(Uid, status, kqpResult.Issues(), maxReadType, CompileCpuTime,
+                                std::move(QueryId), std::move(QueryAst), meta, false);
+        KqpCompileResult->DiscardResult = kqpResult.DiscardResults;
         KqpCompileResult->CommandTagName = kqpResult.CommandTagName;
 
         if (status == Ydb::StatusIds::SUCCESS) {
