@@ -1,0 +1,66 @@
+metadata:
+    kind: MainConfig
+    cluster: ""
+    version : 7
+config:
+  yaml_config_enabled: true
+  erasure: block-4-2
+  fail_domain_type: disk
+  self_management_config:
+    enabled: true
+  default_disk_type: SSD
+  host_configs:
+  - host_config_id: 1
+    drive:
+    - path: /dev/disk/by-partlabel/kikimr_nvme_01
+      type: SSD
+    - path: /dev/disk/by-partlabel/kikimr_nvme_02
+      type: SSD
+    - path: /dev/disk/by-partlabel/kikimr_nvme_03
+      type: SSD
+    - path: /dev/disk/by-partlabel/kikimr_nvme_04
+      type: SSD
+  hosts:
+  - host: myt0-7485.search.yandex.net
+    host_config_id: 1
+    location:
+      body: 1
+      data_center: 'zone-a'
+      rack: '1'
+  - host: myt0-7587.search.yandex.net
+    host_config_id: 1
+    location:
+      body: 2
+      data_center: 'zone-a'
+      rack: '2'
+  interconnect_config:
+    start_tcp: true
+    # encryption_mode: OPTIONAL
+    # path_to_certificate_file: "/opt/ydb/certs/node.crt"
+    # path_to_private_key_file: "/opt/ydb/certs/node.key"
+    # path_to_ca_file: "/opt/ydb/certs/ca.crt"
+  grpc_config:
+    # cert: "/opt/ydb/certs/node.crt"
+    # key: "/opt/ydb/certs/node.key"
+    # ca: "/opt/ydb/certs/ca.crt"
+    services_enabled:
+    - legacy
+  feature_flags:
+    enable_shutting_down_node_state: true
+  log_config:
+    default_level: 4  # WARN level - минимум логов
+    entry:
+    - component: KQP_COMPILE_SERVICE
+      level: 7  # DEBUG - компиляция и warmup
+    - component: KQP_PROXY
+      level: 6  # INFO - обработка запросов
+    - component: KQP_NODE
+      level: 7  # INFO - node service
+    - component: KQP_SESSION
+      level: 6  # INFO - сессии
+    - component: GRPC_SERVER
+      level: 6  # INFO - gRPC сервер
+    - component: SCHEME_BOARD
+      level: 5  # NOTICE - метаданные схемы
+    - component: SYSTEM_VIEWS
+      level: 7
