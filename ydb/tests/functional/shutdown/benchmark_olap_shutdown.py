@@ -516,7 +516,7 @@ class OlapBenchmark:
         sql = self.queries[query_name]
         start = time.time()
         try:
-            self.pool.execute_with_retries(sql)
+            self.pool.execute_with_retries(sql, retry_settings=ydb.RetrySettings(max_retries=0))
             return QueryResult(
                 query_name=query_name, status="ok",
                 latency_sec=time.time() - start, timestamp=start,
@@ -687,7 +687,8 @@ def cmd_check(args):
         table_path = f"`{bench.tpch_path}/{tbl}`"
         try:
             result = bench.pool.execute_with_retries(
-                f"SELECT COUNT(*) AS cnt FROM {table_path}"
+                f"SELECT COUNT(*) AS cnt FROM {table_path}",
+                retry_settings=ydb.RetrySettings(max_retries=0),
             )
             cnt = result[0].rows[0]["cnt"]
             logger.info(f"  {tbl:<12}: {cnt:>12,} rows")

@@ -1,7 +1,7 @@
 metadata:
     kind: MainConfig
     cluster: ""
-    version : 7
+    version : 10
 config:
   yaml_config_enabled: true
   erasure: block-4-2
@@ -46,7 +46,7 @@ config:
     services_enabled:
     - legacy
   feature_flags:
-    enable_shutting_down_node_state: true
+    enable_shutting_down_node_state: false
   log_config:
     default_level: 4  # WARN level - минимум логов
     entry:
