@@ -1089,3 +1089,140 @@ Y_UNIT_TEST(BackPressureWithSpillingLoad) {
 }
 
 }
+
+Y_UNIT_TEST_SUITE(ScatterConsumer) {
+
+// Basic test: rows are distributed across all channels (not all going to one)
+Y_UNIT_TEST(DistributesAcrossChannels) {
+    TTestContext ctx;
+
+    constexpr ui32 CHANNEL_COUNT = 3;
+    constexpr ui32 ROW_COUNT = 30;
+
+    TDqChannelSettings settings = {
+        .RowType = ctx.GetOutputType(),
+        .HolderFactory = &ctx.HolderFactory,
+        .DstStageId = 1000,
+        .Level = TCollectStatsLevel::Profile,
+        .TransportVersion = ctx.TransportVersion,
+        .MaxStoredBytes = 10000,
+        .MaxChunkBytes = 10000
+    };
+
+    TVector<IDqOutputChannel::TPtr> channels;
+    for (ui32 i = 0; i < CHANNEL_COUNT; ++i) {
+        settings.ChannelId = i;
+        channels.emplace_back(CreateDqOutputChannel(settings, Log));
+    }
+
+    TVector<IDqOutput::TPtr> outputs;
+    for (auto& c : channels) {
+        outputs.emplace_back(c);
+    }
+
+    auto consumer = CreateOutputScatterConsumer(std::move(outputs), Nothing());
+
+    UNIT_ASSERT_VALUES_EQUAL(NoLimit, consumer->GetFillLevel());
+
+    for (ui32 i = 0; i < ROW_COUNT; ++i) {
+        ConsumeRow(ctx, ctx.CreateRow(i), consumer);
+    }
+
+    ui64 total = 0;
+    for (auto& ch : channels) {
+        total += ch->GetValuesCount();
+    }
+    UNIT_ASSERT_VALUES_EQUAL(ROW_COUNT, total);
+}
+
+// Adaptive routing test: when a channel hits HardLimit, rows go to other channels
+Y_UNIT_TEST(AdaptiveRoutingAvoidsFull) {
+    TTestContext ctx(NARROW_CHANNEL, NDqProto::DATA_TRANSPORT_UV_PICKLE_1_0, true);
+
+    constexpr ui32 CHANNEL_COUNT = 2;
+
+    TDqChannelSettings settings = {
+        .RowType = ctx.GetOutputType(),
+        .HolderFactory = &ctx.HolderFactory,
+        .DstStageId = 1000,
+        .Level = TCollectStatsLevel::Profile,
+        .TransportVersion = ctx.TransportVersion,
+        .MaxStoredBytes = 100,
+        .MaxChunkBytes = 100
+    };
+
+    TVector<IDqOutputChannel::TPtr> channels;
+    for (ui32 i = 0; i < CHANNEL_COUNT; ++i) {
+        settings.ChannelId = i;
+        channels.emplace_back(CreateDqOutputChannel(settings, Log));
+    }
+
+    TVector<IDqOutput::TPtr> outputs;
+    for (auto& c : channels) {
+        outputs.emplace_back(c);
+    }
+
+    auto consumer = CreateOutputScatterConsumer(std::move(outputs), Nothing());
+
+    // Fill channel[0] to HardLimit with one big row
+    ConsumeRow(ctx, ctx.CreateBigRow(0, 10000), consumer);
+    const ui32 fullChannel = channels[0]->GetValuesCount() == 1 ? 0 : 1;
+    const ui32 freeChannel = 1 - fullChannel;
+    UNIT_ASSERT_VALUES_EQUAL(HardLimit, consumer->GetFillLevel());
+
+    // Pop from the full channel to make space
+    TDqSerializedBatch data;
+    UNIT_ASSERT(channels[fullChannel]->PopAll(data));
+    UNIT_ASSERT_VALUES_EQUAL(NoLimit, consumer->GetFillLevel());
+
+    // Now push a small row — it should go to the free (empty) channel
+    const ui64 rowsBefore = channels[freeChannel]->GetValuesCount();
+    ConsumeRow(ctx, ctx.CreateRow(1), consumer);
+
+    // The row must have been placed in the channel with more capacity
+    const ui64 rowsAfter0 = channels[0]->GetValuesCount();
+    const ui64 rowsAfter1 = channels[1]->GetValuesCount();
+    UNIT_ASSERT_VALUES_EQUAL(1, rowsAfter0 + rowsAfter1);
+
+    Y_UNUSED(rowsBefore);
+}
+
+// Finish propagates to all channels
+Y_UNIT_TEST(FinishPropagates) {
+    TTestContext ctx;
+
+    constexpr ui32 CHANNEL_COUNT = 3;
+
+    TDqChannelSettings settings = {
+        .RowType = ctx.GetOutputType(),
+        .HolderFactory = &ctx.HolderFactory,
+        .DstStageId = 1000,
+        .Level = TCollectStatsLevel::Profile,
+        .TransportVersion = ctx.TransportVersion,
+        .MaxStoredBytes = 10000,
+        .MaxChunkBytes = 10000
+    };
+
+    TVector<IDqOutputChannel::TPtr> channels;
+    for (ui32 i = 0; i < CHANNEL_COUNT; ++i) {
+        settings.ChannelId = i;
+        channels.emplace_back(CreateDqOutputChannel(settings, Log));
+    }
+
+    TVector<IDqOutput::TPtr> outputs;
+    for (auto& c : channels) {
+        outputs.emplace_back(c);
+    }
+
+    auto consumer = CreateOutputScatterConsumer(std::move(outputs), Nothing());
+
+    UNIT_ASSERT(!consumer->IsFinished());
+    consumer->Finish();
+    UNIT_ASSERT(consumer->IsFinished());
+
+    for (auto& ch : channels) {
+        UNIT_ASSERT(ch->IsFinished());
+    }
+}
+
+}

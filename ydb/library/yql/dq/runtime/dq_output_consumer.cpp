@@ -1009,6 +1009,94 @@ private:
     std::shared_ptr<TDqFillAggregator> Aggregator;
 };
 
+class TDqOutputScatterConsumer : public IDqOutputConsumer {
+public:
+    TDqOutputScatterConsumer(TVector<IDqOutput::TPtr>&& outputs, TMaybe<ui32> outputWidth)
+        : Outputs(std::move(outputs))
+        , OutputWidth(outputWidth)
+        , Tmp(outputWidth.Defined() ? *outputWidth : 0u)
+    {
+        Aggregator = std::make_shared<TDqFillAggregator>();
+        for (auto& output : Outputs) {
+            output->SetFillAggregator(Aggregator);
+        }
+    }
+
+    EDqFillLevel GetFillLevel() const override {
+        auto result = Aggregator->GetFillLevel();
+        if (result == HardLimit) {
+            for (auto& output : Outputs) {
+                output->UpdateFillLevel();
+            }
+            result = Aggregator->GetFillLevel();
+        }
+        return result;
+    }
+
+    void Consume(TUnboxedValue&& value) final {
+        YQL_ENSURE(!OutputWidth.Defined());
+        Outputs[PickOutput()]->Push(std::move(value));
+    }
+
+    void WideConsume(TUnboxedValue* values, ui32 count) final {
+        YQL_ENSURE(OutputWidth.Defined() && OutputWidth == count);
+        std::copy(values, values + count, Tmp.begin());
+        Outputs[PickOutput()]->WidePush(Tmp.data(), count);
+    }
+
+    void Consume(NDqProto::TCheckpoint&& checkpoint) override {
+        for (auto& output : Outputs) {
+            output->Push(NDqProto::TCheckpoint(checkpoint));
+        }
+    }
+
+    void Consume(NDqProto::TWatermark&& watermark) override {
+        for (auto& output : Outputs) {
+            output->Push(NDqProto::TWatermark(watermark));
+        }
+    }
+
+    void Finish() override {
+        for (auto& output : Outputs) {
+            output->Finish();
+        }
+    }
+
+    void Flush() override {
+        for (auto& output : Outputs) {
+            output->Flush();
+        }
+    }
+
+    bool IsFinished() const override {
+        return Aggregator->IsFinished();
+    }
+
+    bool IsEarlyFinished() const override {
+        return Aggregator->IsEarlyFinished();
+    }
+
+private:
+    // Pick the output with the lowest fill level (adaptive routing)
+    size_t PickOutput() const {
+        size_t best = 0;
+        EDqFillLevel bestLevel = Outputs[0]->UpdateFillLevel();
+        for (size_t i = 1; i < Outputs.size(); ++i) {
+            EDqFillLevel level = Outputs[i]->UpdateFillLevel();
+            if (level < bestLevel) {
+                bestLevel = level;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    TVector<IDqOutput::TPtr> Outputs;
+    const TMaybe<ui32> OutputWidth;
+    TUnboxedValueVector Tmp;
+    std::shared_ptr<TDqFillAggregator> Aggregator;
+};
+
 } // namespace
 
 IDqOutputConsumer::TPtr CreateOutputMultiConsumer(TVector<IDqOutputConsumer::TPtr>&& consumers) {
@@ -1124,6 +1212,10 @@ IDqOutputConsumer::TPtr CreateOutputHashPartitionConsumer(
 
 IDqOutputConsumer::TPtr CreateOutputBroadcastConsumer(TVector<IDqOutput::TPtr>&& outputs, TMaybe<ui32> outputWidth) {
     return MakeIntrusive<TDqOutputBroadcastConsumer>(std::move(outputs), outputWidth);
+}
+
+IDqOutputConsumer::TPtr CreateOutputScatterConsumer(TVector<IDqOutput::TPtr>&& outputs, TMaybe<ui32> outputWidth) {
+    return MakeIntrusive<TDqOutputScatterConsumer>(std::move(outputs), outputWidth);
 }
 
 } // namespace NYql::NDq
