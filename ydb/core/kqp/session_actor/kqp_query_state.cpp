@@ -199,9 +199,7 @@ bool TKqpQueryState::TryGetFromCache(
     TKqpQueryCache& cache,
     const TGUCSettings::TPtr& gUCSettingsPtr,
     TIntrusivePtr<TKqpCounters>& counters,
-    const TActorId& sender,
-    TKqpTransactionContext* txCtx,
-    EWarmupAttributionMode warmupAttribution)
+    const TActorId& sender)
 {
     if (QueryPhysicalGraph) {
         YQL_ENSURE(QueryType == NKikimrKqp::EQueryType::QUERY_TYPE_SQL_GENERIC_SCRIPT);
@@ -262,8 +260,7 @@ bool TKqpQueryState::TryGetFromCache(
         counters,
         DbCounters,
         sender,
-        TlsActivationContext->AsActorContext(),
-        warmupAttribution);
+        TlsActivationContext->AsActorContext());
 
     if (compileResult) {
         if (SaveAndCheckCompileResult(compileResult)) {

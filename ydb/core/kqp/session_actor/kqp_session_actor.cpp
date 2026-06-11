@@ -733,12 +733,6 @@ public:
         ReplySuccess();
     }
 
-    EWarmupAttributionMode QuickPathWarmupAttribution() const {
-        return QueryState->IsWarmupCompilation_
-            ? EWarmupAttributionMode::Warmup
-            : EWarmupAttributionMode::Client;
-    }
-
     void CompileQuery() {
         YQL_ENSURE(QueryState);
         QueryState->CompilationRunning = true;
@@ -746,7 +740,7 @@ public:
         Become(&TKqpSessionActor::ExecuteState);
 
         // quick path
-        if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId(), txCtx, QuickPathWarmupAttribution()) && !QueryState->CompileResult->NeedToSplit) {
+        if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
 
             // even if we have successfully compilation result, it doesn't mean anything
@@ -871,7 +865,7 @@ public:
 
     void CompileStatement() {
         // quick path
-        if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId(), txCtx, QuickPathWarmupAttribution()) && !QueryState->CompileResult->NeedToSplit) {
+        if (QueryState->TryGetFromCache(*QueryCache, GUCSettings, Counters, SelfId()) && !QueryState->CompileResult->NeedToSplit) {
             LWTRACK(KqpSessionQueryCompiled, QueryState->Orbit, TStringBuilder() << QueryState->CompileResult->Status);
 
             QueryState->CompileResult->IncUsage();
