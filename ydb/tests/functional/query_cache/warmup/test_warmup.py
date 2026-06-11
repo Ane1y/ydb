@@ -77,7 +77,7 @@ def _is_tcp_port_open(host, port, timeout=0.4):
 
 
 class CompileCacheView:
-    """Helper for working with compile cache sysview, warmup counters,
+    """Helper for working with compile cache sysview, warmup counters
     and cache population on cluster nodes."""
 
     def __init__(self, cluster, database="/Root"):
@@ -212,32 +212,6 @@ class CompileCacheView:
         except Exception as e:
             logger.warning("Failed to get counters from node %d: %s", node.node_id, e)
         return {}
-
-    @staticmethod
-    def get_warmup_window_counters(node):
-        # Observation-window counters: Warmup/HitsInWindow,
-        # Warmup/MissesInWindow, Warmup/SavedCompileMs.
-        counters = CompileCacheView.get_warmup_counters(node)
-        return {
-            "hits": counters.get("Warmup/HitsInWindow", 0),
-            "misses": counters.get("Warmup/MissesInWindow", 0),
-            "saved_ms": counters.get("Warmup/SavedCompileMs", 0),
-        }
-
-    @staticmethod
-    def get_peer_scan_warnings(node):
-        """Read CompileCacheView/PeerScanWarnings from the node's monitoring port."""
-        try:
-            url = f"http://localhost:{node.mon_port}/counters/counters=kqp/json"
-            response = requests.get(url, timeout=5)
-            if response.status_code != 200:
-                return 0
-            for sensor in response.json().get("sensors", []):
-                if sensor.get("labels", {}).get("sensor") == "CompileCacheView/PeerScanWarnings":
-                    return sensor.get("value", 0)
-        except Exception as e:
-            logger.warning("Failed to read PeerScanWarnings from node %d: %s", node.node_id, e)
-        return 0
 
     def trigger_compile_cache_scan(self, node, timeout_seconds=30):
         """Run a SELECT against compile_cache_queries sysview pinned to `node`.
@@ -444,19 +418,6 @@ class TestWarmupBasic:
             [node.node_id], use_query_api=use_query_api,
         )
 
-    def _assert_warmup_attribution_hits(self, node, label):
-        # Best-effort: after restart, session routing isn't fully reliable,
-        # so populate_cache_on_nodes may silently bail (30-attempt pin loop)
-        # and HitsInWindow never bumps. Cache contents are already verified by
-        # _assert_cache_hit; strict attribution is covered by TestWarmupCounters.
-        ctrs = CompileCacheView.get_warmup_window_counters(node)
-        logger.info("[%s] Node %d warmup window counters: %s", label, node.node_id, ctrs)
-        if ctrs["hits"] == 0:
-            logger.warning(
-                "[%s] HitsInWindow stayed 0 — likely session-pin retry exhausted, "
-                "see TestWarmupCounters for the strict check", label,
-            )
-
     @staticmethod
     def _run_pinned_queries_table_api(node, queries, query_timeout=15):
         settings = ydb.BaseRequestSettings().with_timeout(query_timeout)
@@ -503,14 +464,12 @@ class TestWarmupBasic:
         self._assert_warmup(node3, "TableAPI")
         self._assert_cache_hit(table_queries, node3, "TableAPI", use_query_api=False)
         self._trigger_client_hits(node3, use_query_api=False)
-        self._assert_warmup_attribution_hits(node3, "TableAPI")
 
         logger.info("SCENARIO 2/3: Query API warmup (restart node 3)")
         self._restart_node(node3)
         self._assert_warmup(node3, "QueryAPI")
         # Query API _assert_cache_hit already runs the queries against node3.
         self._assert_cache_hit(query_queries, node3, "QueryAPI", use_query_api=True)
-        self._assert_warmup_attribution_hits(node3, "QueryAPI")
 
         # QueryType is part of TKqpQueryId, so Table API and Query API entries
         # live in different cache buckets — populate both before S3.
@@ -530,9 +489,6 @@ class TestWarmupBasic:
             f"SELECT 7919 + {i} AS unique_warmup_miss_probe_t_{i}"
             for i in range(6)
         ]
-        ctrs_before_4a = CompileCacheView.get_warmup_window_counters(node3)
-        logger.info("[Concurrent/3a Table] window before: %s", ctrs_before_4a)
-
         ok_t, errors_t = self._run_pinned_queries_table_api(
             node3, warmed_queries + fresh_table,
         )
@@ -543,19 +499,6 @@ class TestWarmupBasic:
         )
         assert ok_t == len(warmed_queries) + len(fresh_table), (
             f"[Concurrent/3a Table] Expected all queries OK, got {ok_t}"
-        )
-
-        ctrs_after_4a = CompileCacheView.get_warmup_window_counters(node3)
-        logger.info("[Concurrent/3a Table] window after: %s", ctrs_after_4a)
-        d_hits_4a = ctrs_after_4a["hits"] - ctrs_before_4a["hits"]
-        d_misses_4a = ctrs_after_4a["misses"] - ctrs_before_4a["misses"]
-        assert d_hits_4a >= len(warmed_queries), (
-            f"[Concurrent/3a Table] Warmed queries pinned to node3 must bump "
-            f"Warmup/HitsInWindow >= {len(warmed_queries)}, got delta={d_hits_4a}, ctrs={ctrs_after_4a}"
-        )
-        assert d_misses_4a >= len(fresh_table), (
-            f"[Concurrent/3a Table] Fresh probes pinned to node3 must bump "
-            f"Warmup/MissesInWindow >= {len(fresh_table)}, got delta={d_misses_4a}, ctrs={ctrs_after_4a}"
         )
 
         # 4b: Query API
@@ -573,19 +516,6 @@ class TestWarmupBasic:
         )
         assert ok_q == len(warmed_queries) + len(fresh_query), (
             f"[Concurrent/3b Query] Expected all queries OK, got {ok_q}"
-        )
-
-        ctrs_after_4b = CompileCacheView.get_warmup_window_counters(node3)
-        logger.info("[Concurrent/3b Query] window after: %s", ctrs_after_4b)
-        d_hits_4b = ctrs_after_4b["hits"] - ctrs_after_4a["hits"]
-        d_misses_4b = ctrs_after_4b["misses"] - ctrs_after_4a["misses"]
-        assert d_hits_4b >= len(warmed_queries), (
-            f"[Concurrent/3b Query] Warmed queries pinned to node3 must bump "
-            f"Warmup/HitsInWindow >= {len(warmed_queries)}, got delta={d_hits_4b}, ctrs={ctrs_after_4b}"
-        )
-        assert d_misses_4b >= len(fresh_query), (
-            f"[Concurrent/3b Query] Fresh probes pinned to node3 must bump "
-            f"Warmup/MissesInWindow >= {len(fresh_query)}, got delta={d_misses_4b}, ctrs={ctrs_after_4b}"
         )
 
         logger.info("ALL 3 BASIC SCENARIOS PASSED (incl. 3a Table + 3b Query)")
@@ -742,161 +672,6 @@ class TestWarmupStress:
         logger.info("ALL 3 STRESS SCENARIOS PASSED")
 
 
-class TestWarmupCounters:
-    """Independent counter-attribution check per client API (Table vs Query).
-
-    Table API, Query API and PG paths are not symmetric in YDB and are wired
-    at different layers, so we exercise Warmup/{Hits,Misses,SavedCompile}InWindow
-    once per API to keep the signal isolated from TestWarmupBasic scenarios.
-    """
-
-    @classmethod
-    def setup_class(cls):
-        cls.config = _make_warmup_config(nodes=2)
-        cls.cluster = kikimr_cluster_factory(cls.config)
-        cls.cluster.start()
-        cls.driver = ydb.Driver(
-            endpoint=f"grpc://localhost:{cls.cluster.nodes[1].port}",
-            database="/Root",
-        )
-        cls.driver.wait(timeout=10)
-        cls.cache = CompileCacheView(cls.cluster)
-
-    @classmethod
-    def teardown_class(cls):
-        if hasattr(cls, "driver"):
-            cls.driver.stop()
-        if hasattr(cls, "cluster"):
-            cls.cluster.stop()
-
-    @pytest.mark.parametrize("use_query_api", [False, True], ids=["table", "query"])
-    def test_warmup_counters_attribution(self, use_query_api):
-        node2 = self.cluster.nodes[2]
-        all_node_ids = sorted(self.cluster.nodes.keys())
-
-        # Populate cache so node2 has something to fetch from node1 after restart.
-        self.cache.populate_cache_on_nodes(all_node_ids, use_query_api=use_query_api)
-        time.sleep(2)
-
-        # Restart node2: empty its cache, force warmup to refill from node1.
-        node2.stop()
-        time.sleep(2)
-        node2.start()
-        time.sleep(5)
-
-        finished = CompileCacheView.wait_for_warmup_finished(
-            node2, timeout=NODE_READY_TIMEOUT_SECONDS + WARMUP_DEADLINE_SECONDS,
-        )
-        compiled = finished.get("Warmup/QueriesCompiled", 0)
-        assert compiled > 0, (
-            f"Warmup must populate node2 cache (compiled={compiled}, ctrs={finished})"
-        )
-
-        before = CompileCacheView.get_warmup_window_counters(node2)
-        logger.info("[Counters] window before client traffic: %s", before)
-
-        # Client traffic on warmed entries: each distinct query that warmup
-        # repopulated should fire HitsInWindow at least once.
-        # populate_cache_on_nodes runs WARMUP_QUERIES + WARMUP_QUERY_PARAM.
-        expected_hits = len(WARMUP_QUERIES) + 1  # the parameterized query
-        self.cache.populate_cache_on_nodes([node2.node_id], use_query_api=use_query_api)
-        after_hit = CompileCacheView.get_warmup_window_counters(node2)
-        logger.info("[Counters] window after warmed-entry hit: %s", after_hit)
-
-        hits_delta = after_hit["hits"] - before["hits"]
-        assert hits_delta >= expected_hits, (
-            f"Warmup/HitsInWindow must increment by at least {expected_hits} "
-            f"(one per distinct warmed query) after client traffic, "
-            f"got delta={hits_delta}. before={before}, after={after_hit}"
-        )
-        assert after_hit["saved_ms"] > before["saved_ms"], (
-            "Warmup/SavedCompileMs must increase when warmup hits are attributed. "
-            f"before={before}, after={after_hit}"
-        )
-
-        # Fresh query inside the same observation window: each unique probe must
-        # bump MissesInWindow once.
-        fresh_queries = [
-            f"SELECT 7919 + {i} AS unique_warmup_miss_probe_{i}"
-            for i in range(3)
-        ]
-        self.cache.populate_cache_on_nodes(
-            [node2.node_id], extra_queries=fresh_queries, use_query_api=use_query_api,
-        )
-        after_miss = CompileCacheView.get_warmup_window_counters(node2)
-        logger.info("[Counters] window after fresh-query miss: %s", after_miss)
-
-        misses_delta = after_miss["misses"] - after_hit["misses"]
-        assert misses_delta >= len(fresh_queries), (
-            f"Warmup/MissesInWindow must increment by at least {len(fresh_queries)} "
-            f"(one per fresh probe), got delta={misses_delta}. "
-            f"after_hit={after_hit}, after_miss={after_miss}"
-        )
-
-
-class TestCompileCacheViewPeerWarnings:
-    """Wiring sanity check for CompileCacheView/PeerScanWarnings."""
-
-    @classmethod
-    def setup_class(cls):
-        cls.config = _make_warmup_config(nodes=3)
-        cls.cluster = kikimr_cluster_factory(cls.config)
-        cls.cluster.start()
-        cls.cache = CompileCacheView(cls.cluster)
-
-    @classmethod
-    def teardown_class(cls):
-        if hasattr(cls, "cluster"):
-            cls.cluster.stop()
-
-    def test_peer_scan_warnings_increment_on_dead_peer(self):
-        all_node_ids = sorted(self.cluster.nodes.keys())
-        live_node_id = all_node_ids[0]
-        dead_node_id = all_node_ids[-1]
-        live_node = self.cluster.nodes[live_node_id]
-        dead_node = self.cluster.nodes[dead_node_id]
-
-        self.cache.populate_cache_on_nodes(all_node_ids, use_query_api=False)
-        time.sleep(2)
-
-        baseline = CompileCacheView.get_peer_scan_warnings(live_node)
-        logger.info("[PeerWarnings] baseline on node %d: %d", live_node_id, baseline)
-
-        logger.info("[PeerWarnings] stopping node %d to simulate dead peer", dead_node_id)
-        dead_node.stop()
-        # Give interconnect time to publish the disconnect; without this the
-        # first scan falls through to NodeRequestTimeout (10s).
-        time.sleep(3)
-
-        try:
-            # Each successful scan against a federated sysview that hits the dead
-            # peer should bump PeerScanWarnings exactly once. Run a fixed number
-            # of scans and require the counter to grow by at least that many.
-            scans_to_run = 3
-            deadline = time.time() + 60
-            scans_done = 0
-            while scans_done < scans_to_run and time.time() < deadline:
-                self.cache.trigger_compile_cache_scan(live_node, timeout_seconds=30)
-                scans_done += 1
-                current = CompileCacheView.get_peer_scan_warnings(live_node)
-                logger.info(
-                    "[PeerWarnings] after scan %d/%d: %d (baseline %d)",
-                    scans_done, scans_to_run, current, baseline,
-                )
-                time.sleep(1)
-
-            final = CompileCacheView.get_peer_scan_warnings(live_node)
-            delta = final - baseline
-            assert delta >= scans_done, (
-                "CompileCacheView/PeerScanWarnings must increment at least once "
-                f"per scan that hits the dead peer; ran {scans_done} scans, "
-                f"got delta={delta} (baseline={baseline}, final={final})"
-            )
-        finally:
-            dead_node.start()
-            time.sleep(3)
-
-
 class TestWarmupSingleNode:
     SOFT_DEADLINE_SECONDS = 10
     HARD_DEADLINE_SECONDS = 12
@@ -951,14 +726,6 @@ class TestWarmupSingleNode:
             assert result[0].rows[0].r == 2, "Cluster must serve queries after warmup skip"
         finally:
             pool.stop()
-
-        # HitsInWindow/MissesInWindow only attribute to in-window inserts;
-        # without warmup inserts the window stays closed.
-        window = CompileCacheView.get_warmup_window_counters(node)
-        logger.info("[SingleNode] window counters after client query: %s", window)
-        assert window["hits"] == 0 and window["misses"] == 0, (
-            f"[SingleNode] Observation window must not open without warmup inserts, got {window}"
-        )
 
         logger.info("SingleNode skip scenario PASSED")
 
@@ -1016,15 +783,6 @@ class TestWarmupMultiNodeColdStart:
             assert result[0].rows[0].r == 2, "Cluster must serve queries after cold-start warmup"
         finally:
             pool.stop()
-
-        for nid in sorted(self.cluster.nodes.keys()):
-            node = self.cluster.nodes[nid]
-            window = CompileCacheView.get_warmup_window_counters(node)
-            logger.info("[ColdStart] node %d window counters: %s", nid, window)
-            assert window["hits"] == 0 and window["misses"] == 0, (
-                f"[ColdStart] node {nid}: observation window must not open without "
-                f"warmup inserts, got {window}"
-            )
 
         logger.info("MultiNodeColdStart no-queries scenario PASSED")
 

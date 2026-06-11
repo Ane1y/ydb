@@ -15,7 +15,6 @@
 #include <ydb/core/kqp/common/kqp_user_request_context.h>
 #include <ydb/core/kqp/common/kqp.h>
 #include <ydb/core/kqp/common/simple/temp_tables.h>
-#include <ydb/core/kqp/compile_service/kqp_compile_service.h>
 
 #include <ydb/library/actors/core/monotonic_provider.h>
 
@@ -585,9 +584,7 @@ public:
         TKqpQueryCache& cache,
         const TGUCSettings::TPtr& gUCSettingsPtr,
         TIntrusivePtr<TKqpCounters>& counters,
-        const TActorId& sender,
-        TKqpTransactionContext* txCtx = nullptr,
-        EWarmupAttributionMode warmupAttribution = EWarmupAttributionMode::None);
+        const TActorId& sender);
 
     // build the compilation request.
     std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
