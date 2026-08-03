@@ -559,4 +559,8 @@ message TTableServiceConfig {
 
     // Defer join-filter inlining until after cost-based optimization.
     optional bool EnableInlineJoinFiltersAfterCBO = 140 [default = true, (InvalidateCompileCache) = true];
+
+    // Let a ParallelUnionAll consumer stage size itself from resources instead of copying the producer task count.
+    // Requires scatter wiring: with one-to-one channels a consumer beyond the producer count would get no input.
+    optional bool EnableParallelUnionAllConsumerSizing = 141 [default = false, (InvalidateCompileCache) = true];
 };
