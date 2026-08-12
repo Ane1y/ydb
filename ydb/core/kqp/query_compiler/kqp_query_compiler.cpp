@@ -1169,6 +1169,15 @@ private:
         programProto.SetLangVer(Config->GetDefaultLangVer());
 
         stagePredictor.SerializeToKqpSettings(*programProto.MutableSettings());
+        bool hasPhyHashCombine = false;
+        VisitExpr(stage.Program().Ptr(), [&](const TExprNode::TPtr& exprNode) {
+            if (TExprBase(exprNode).Maybe<TDqPhyHashCombine>()) {
+                hasPhyHashCombine = true;
+                return false;
+            }
+            return true;
+        });
+        programProto.MutableSettings()->SetHasPhyHashCombine(hasPhyHashCombine);
 
         for (auto member : paramsType->GetItems()) {
             auto paramName = TString(member->GetName());
