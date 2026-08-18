@@ -924,12 +924,18 @@ void TKqpTasksGraph::BuildParallelUnionAllChannels(const TStageInfo& stageInfo, 
 {
     const ui64 inputStageTasksSize = inputStageInfo.Tasks.size();
     const ui64 originStageTasksSize = stageInfo.Tasks.size();
+    // Runtime range pruning may legitimately leave one UNION ALL input with no producer tasks. Such an input is an
+    // empty stream: it needs no channels and, in particular, must not enter BuildScatterChannels (which divides by the
+    // producer count). Other non-empty UNION branches still wire normally.
+    if (!inputStageTasksSize) {
+        return;
+    }
     Y_ENSURE(originStageTasksSize);
     Y_ENSURE(nextOriginTaskId < originStageTasksSize);
 
     // More consumers than producers: one-to-one wiring would leave the extra consumers without any input, so give every
     // producer a fan of channels instead. Only reachable when the consumer stage was sized from resources.
-    if (originStageTasksSize > inputStageTasksSize) {
+    if (GetMeta().EnableParallelUnionAllConsumerSizing && originStageTasksSize > inputStageTasksSize) {
         BuildScatterChannels(stageInfo, inputIndex, inputStageInfo, outputIndex, enableSpilling, logFunc);
         return;
     }
@@ -3956,7 +3962,8 @@ void TKqpTasksGraph::CountComputeTasks(TStageInfo& stageInfo, const ui32 nodesCo
                 continue;
             }
             const auto inputStageId = NYql::NDq::TStageId(stageId.TxId, input.GetStageIndex());
-            if (partitionsCount > MaxTasksGraph->GetStageTasksCount(inputStageId)) {
+            const ui64 inputTasksCount = MaxTasksGraph->GetStageTasksCount(inputStageId);
+            if (inputTasksCount && partitionsCount > inputTasksCount) {
                 scatterInputs.push_back(inputStageId);
             }
         }
