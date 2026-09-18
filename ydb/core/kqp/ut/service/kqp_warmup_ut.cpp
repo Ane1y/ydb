@@ -7,6 +7,7 @@
 #include <ydb/library/yql/public/ydb_issue/ydb_issue_message.h>
 #include <ydb/core/kqp/common/simple/services.h>
 #include <ydb/library/aclib/aclib.h>
+#include <ydb/library/ydb_issue/issue_helpers.h>
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
@@ -1006,7 +1007,53 @@ namespace {
                 "No entries should fail for empty database");
         }
 
-        Y_UNIT_TEST(WarmupServerlessUnavailable) {
+        Y_UNIT_TEST_TWIN(WarmupUnsupportedDatabaseDoesNotRetry, Shared) {
+            TWarmupTestParams params;
+            params.UseRealThreads = false;
+            params.UserSids = {"user0"};
+            params.FillImplicitParams = false;
+
+            TKikimrRunner kikimr(MakeWarmupTestSettings(params));
+            TWarmupTestEnv env = PrepareWarmupTest(kikimr, params);
+            const TString reason = Shared
+                ? "Compile cache is not available for shared resource (serverless compute) databases"
+                : "Compile cache is not available for serverless databases";
+            ui32 readRequests = 0;
+            ui32 prepareRequests = 0;
+            const auto compileObserver = env.Runtime.AddObserver<TEvKqp::TEvQueryRequest>(
+                [&](TEvKqp::TEvQueryRequest::TPtr& ev) {
+                    if (ev->Get()->Record.GetRequest().GetIsWarmupCompilation()) {
+                        ++prepareRequests;
+                    }
+                });
+            const auto sysviewObserver = env.Runtime.AddObserver<TEvKqp::TEvListQueryCacheQueriesRequest>(
+                [&](TEvKqp::TEvListQueryCacheQueriesRequest::TPtr& ev) {
+                    ++readRequests;
+                    auto response = std::make_unique<TEvKqp::TEvListQueryCacheQueriesResponse>();
+                    response->Record.SetNodeId(ev->Cookie);
+                    response->Record.SetStatus(Ydb::StatusIds::UNSUPPORTED);
+                    NYql::TIssues issues;
+                    issues.AddIssue(MakeIssue(NKikimrIssues::TIssuesIds::COMPILE_CACHE_UNSUPPORTED_DATABASE, reason));
+                    NYql::IssuesToMessage(issues, response->Record.MutableIssues());
+                    env.Runtime.Send(new IEventHandle(ev->Sender, ev->Recipient, response.release()));
+                    ev.Reset();
+                });
+
+            TKqpWarmupConfig config;
+            config.SoftDeadline = TDuration::Seconds(5);
+            config.HardDeadline = TDuration::Seconds(10);
+            auto response = RunWarmup(env, config, TDuration::Seconds(11), true);
+            UNIT_ASSERT(response);
+            UNIT_ASSERT_C(response->Get()->Success, response->Get()->Message);
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->Message, "Skipped: " + reason);
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesLoaded, 0);
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesFailed, 0);
+            UNIT_ASSERT_VALUES_EQUAL(prepareRequests, 0);
+            // The main fetch and the diagnostic count each make at most one read.
+            UNIT_ASSERT(readRequests > 0 && readRequests <= 2);
+        }
+
+        Y_UNIT_TEST(WarmupTenantMismatchUnavailable) {
             TWarmupTestParams params;
             params.UseRealThreads = false;
             params.UserSids = {"user0"};
@@ -1511,4 +1558,3 @@ namespace {
     } // Y_UNIT_TEST_SUITE(KqpWarmup)
 
 } // namespace NKikimr::NKqp
-

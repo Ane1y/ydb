@@ -1,5 +1,6 @@
 // we define this to allow using sdk build info.
 #define INCLUDE_YDB_INTERNAL_H
+#include <ydb/core/base/auth.h>
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <library/cpp/json/json_reader.h>
 #include <library/cpp/json/writer/json.h>
@@ -11,6 +12,9 @@
 #include <ydb/public/sdk/cpp/src/client/impl/internal/grpc_connections/grpc_connections.h>
 #include <ydb/core/kqp/common/events/events.h>
 #include <ydb/core/kqp/common/simple/services.h>
+#include <ydb/core/kqp/compile_service/kqp_warmup_compile_actor.h>
+#include <ydb/library/ydb_issue/issue_helpers.h>
+#include <ydb/services/workload_manager/ut/common/workload_service_ut_common.h>
 namespace NKikimr {
 namespace NKqp {
 
@@ -54,6 +58,86 @@ std::unordered_map<std::string, std::unordered_set<std::string>> ParseCompileCac
         return value;
     }
 
+
+void CheckCompileCacheDatabaseIsolation(const TString& authToken, bool enableDatabaseAdmin,
+    bool canReadOtherUsers)
+{
+    TKikimrSettings settings;
+    settings.SetAuthToken("root@builtin").SetUseRealThreads(false).SetWithSampleTables(false);
+    TKikimrRunner kikimr(settings);
+    auto& runtime = *kikimr.GetTestServer().GetRuntime();
+
+    kikimr.RunCall([&] {
+        auto schemeClient = kikimr.GetSchemeClient();
+        auto permissions = TModifyPermissionsSettings().AddChangeOwner("db-owner@builtin");
+        for (const auto& user : {"db-owner@builtin", "user@builtin"}) {
+            permissions.AddGrantPermissions(TPermissions(user,
+                {"ydb.database.connect", "ydb.granular.describe_schema", "ydb.granular.select_row"}));
+        }
+        auto result = schemeClient.ModifyPermissions("/Root", permissions).ExtractValueSync();
+        UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+        return true;
+    });
+
+    auto& appData = runtime.GetAppData();
+    appData.AdministrationAllowedSIDs = {"root@builtin"};
+    appData.FeatureFlags.SetEnableDatabaseAdmin(enableDatabaseAdmin);
+    appData.FeatureFlags.SetEnableCompileCacheView(false);
+    appData.EnforceUserTokenRequirement = true;
+
+    // Simulate the mixed cache returned by a shared compute node. Read through
+    // the SQL API so the test also exercises propagation of the caller's token.
+    ui32 responses = 0;
+    const auto observer = runtime.AddObserver<TEvKqp::TEvListQueryCacheQueriesResponse>(
+        [&](TEvKqp::TEvListQueryCacheQueriesResponse::TPtr& ev) {
+            ++responses;
+            auto& record = ev->Get()->Record;
+            record.ClearCacheCacheQueries();
+            record.SetFinished(true);
+            record.ClearContinuationToken();
+            auto addEntry = [&](const TString& id, const TString& user) {
+                auto* entry = record.AddCacheCacheQueries();
+                entry->SetQueryId(id);
+                entry->SetUserSID(user);
+                entry->SetQuery(TStringBuilder() << "SELECT '" << id << "';");
+                return entry;
+            };
+            addEntry("local-own", authToken)->SetDatabase("/Root");
+            addEntry("local-other", "other@builtin")->SetDatabase("/Root");
+            addEntry("foreign-own", authToken)->SetDatabase("/Root/other-db");
+            addEntry("foreign-other", "other@builtin")->SetDatabase("/Root/other-db");
+            addEntry("missing-database", authToken);
+            addEntry("empty-database", authToken)->SetDatabase("");
+        });
+
+    auto result = kikimr.RunCall([&] {
+        auto driver = TDriver(TDriverConfig()
+            .SetEndpoint(kikimr.GetEndpoint()).SetDatabase("/Root").SetAuthToken(authToken));
+        TTableClient client(driver);
+        auto sessionResult = client.CreateSession().GetValueSync();
+        UNIT_ASSERT_C(sessionResult.IsSuccess(), sessionResult.GetIssues().ToString());
+        auto result = sessionResult.GetSession().ExecuteDataQuery(
+            R"(SELECT QueryId, Query FROM `/Root/.sys/compile_cache_queries`;)",
+            TTxControl::BeginTx().CommitTx()).GetValueSync();
+        driver.Stop(true);
+        return result;
+    });
+    UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+    UNIT_ASSERT_C(responses > 0, "The scan must receive the mixed cache response");
+
+    std::unordered_set<std::string> seen;
+    TResultSetParser parser(result.GetResultSet(0));
+    while (parser.TryNextRow()) {
+        const auto id = parser.ColumnParser("QueryId").GetOptionalUtf8();
+        UNIT_ASSERT(id);
+        UNIT_ASSERT_C(*id == "local-own" || (canReadOtherUsers && *id == "local-other"),
+            "Unexpected cache entry for " << authToken << ": " << *id);
+        seen.insert(*id);
+    }
+    UNIT_ASSERT(seen.contains("local-own"));
+    UNIT_ASSERT_VALUES_EQUAL(seen.contains("local-other"), canReadOtherUsers);
+    UNIT_ASSERT_VALUES_EQUAL(result.GetResultSet(0).RowsCount(), canReadOtherUsers ? 2u : 1u);
+}
 
 } // namespace
 Y_UNIT_TEST_SUITE(KqpSystemView) {
@@ -1631,6 +1715,110 @@ order by SessionId;)", "%Y-%m-%d %H:%M:%S %Z", sessionsSet.front().GetId().data(
         UNIT_ASSERT_EQUAL_C(response->Get()->Record.GetCacheCacheQueries().size(), 0,
             "Tenant mismatch must produce an empty compile cache response, got "
             << response->Get()->Record.GetCacheCacheQueries().size() << " entries");
+    }
+
+    Y_UNIT_TEST(CompileCacheDatabaseIsolationForClusterAdmin) {
+        CheckCompileCacheDatabaseIsolation("root@builtin", false, true);
+    }
+
+    Y_UNIT_TEST(CompileCacheDatabaseIsolationForDatabaseAdmin) {
+        CheckCompileCacheDatabaseIsolation("db-owner@builtin", true, true);
+    }
+
+    Y_UNIT_TEST(CompileCacheDatabaseIsolationForUser) {
+        CheckCompileCacheDatabaseIsolation("user@builtin", false, false);
+    }
+
+    Y_UNIT_TEST(CompileCacheRejectsServerlessAndSharedDatabases) {
+        auto ydb = NWorkloadManager::TYdbSetupSettings()
+            .CreateSampleTenants(true)
+            .EnableResourcePools(false)
+            .CreateSamplePool(false)
+            .Create();
+
+        const NACLib::TUserToken adminToken("root@builtin", TVector<NACLib::TSID>{});
+        UNIT_ASSERT(IsAdministrator(
+            &ydb->GetRuntime()->GetAppData(ydb->GetSharedTenantInfo().NodeIdx), &adminToken));
+
+        auto check = [&](const TString& database, ui64 port, EStatus expected, TStringBuf reason) {
+            TDriver driver(TDriverConfig()
+                .SetEndpoint(TStringBuilder() << "localhost:" << port)
+                .SetDatabase(database).SetAuthToken("root@builtin"));
+            TTableClient client(driver);
+            auto session = client.CreateSession().GetValueSync();
+            UNIT_ASSERT_C(session.IsSuccess(), session.GetIssues().ToString());
+            auto result = session.GetSession().ExecuteDataQuery(
+                "SELECT Query FROM `.sys/compile_cache_queries`;",
+                TTxControl::BeginTx().CommitTx()).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), expected, result.GetIssues().ToString());
+            if (expected != EStatus::SUCCESS) {
+                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), reason);
+                UNIT_ASSERT(HasIssue(result.GetIssues(),
+                    NKikimrIssues::TIssuesIds::COMPILE_CACHE_UNSUPPORTED_DATABASE));
+                UNIT_ASSERT(result.GetResultSets().empty());
+            }
+            driver.Stop(true);
+        };
+
+        check(ydb->GetSettings().GetDedicatedTenantName(), ydb->GetDedicatedTenantInfo().GrpcPort,
+            EStatus::SUCCESS, "");
+        check(ydb->GetSettings().GetServerlessTenantName(), ydb->GetServerlessTenantInfo().GrpcPort,
+            EStatus::UNSUPPORTED, "serverless databases");
+        check(ydb->GetSettings().GetSharedTenantName(), ydb->GetSharedTenantInfo().GrpcPort,
+            EStatus::UNSUPPORTED, "shared resource (serverless compute) databases");
+    }
+
+    Y_UNIT_TEST_TWIN(CompileCacheWarmupSkipsUnsupportedDatabase, Serverless) {
+        auto ydb = NWorkloadManager::TYdbSetupSettings()
+            .CreateSampleTenants(true)
+            .EnableResourcePools(false)
+            .CreateSamplePool(false)
+            .Create();
+        auto& runtime = *ydb->GetRuntime();
+        const auto tenant = ydb->GetSharedTenantInfo();
+        const TString database = Serverless
+            ? ydb->GetSettings().GetServerlessTenantName()
+            : ydb->GetSettings().GetSharedTenantName();
+        TKqpWarmupConfig config;
+        config.SoftDeadline = TDuration::Seconds(15);
+        config.HardDeadline = TDuration::Seconds(30);
+        for (bool deliverTopology : {false, true}) {
+            auto edgeActor = runtime.AllocateEdgeActor(tenant.NodeIdx);
+            auto actor = runtime.Register(CreateKqpWarmupActor(config, database, "", {edgeActor}), tenant.NodeIdx);
+            if (deliverTopology) {
+                runtime.Send(new IEventHandle(actor, edgeActor,
+                    new TEvStartWarmup(1, {runtime.GetNodeId(tenant.NodeIdx)})), tenant.NodeIdx);
+            }
+            auto response = runtime.GrabEdgeEvent<TEvKqpWarmupComplete>(edgeActor, TDuration::Seconds(30));
+            UNIT_ASSERT(response);
+            UNIT_ASSERT_C(response->Get()->Success, response->Get()->Message);
+            UNIT_ASSERT_STRING_CONTAINS(response->Get()->Message, "Skipped: Compile cache is not available for");
+            UNIT_ASSERT_STRING_CONTAINS(response->Get()->Message, Serverless
+                ? "serverless databases" : "shared resource (serverless compute) databases");
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesLoaded, 0);
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesFailed, 0);
+        }
+    }
+
+    Y_UNIT_TEST(CompileCacheWarmupDoesNotTreatUnknownDatabaseAsDedicated) {
+        auto ydb = NWorkloadManager::TYdbSetupSettings()
+            .EnableResourcePools(false)
+            .CreateSamplePool(false)
+            .Create();
+        auto& runtime = *ydb->GetRuntime();
+        auto edgeActor = runtime.AllocateEdgeActor();
+        TKqpWarmupConfig config;
+        config.HardDeadline = TDuration::Seconds(10);
+        auto actor = runtime.Register(CreateKqpWarmupActor(config, "/Root/not-managed", "", {edgeActor}));
+        runtime.Send(new IEventHandle(actor, edgeActor,
+            new TEvStartWarmup(1, {runtime.GetNodeId(0)})));
+        auto response = runtime.GrabEdgeEvent<TEvKqpWarmupComplete>(edgeActor, TDuration::Seconds(15));
+        UNIT_ASSERT(response);
+        UNIT_ASSERT(!response->Get()->Success);
+        UNIT_ASSERT_VALUES_EQUAL(response->Get()->Message,
+            "Cannot determine database resource type for compile cache warmup");
+        UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesLoaded, 0);
+        UNIT_ASSERT_VALUES_EQUAL(response->Get()->EntriesFailed, 0);
     }
 
     Y_UNIT_TEST(CompileCacheUserIsolation) {
