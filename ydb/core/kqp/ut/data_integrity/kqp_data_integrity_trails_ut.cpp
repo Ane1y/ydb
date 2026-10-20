@@ -41,10 +41,10 @@ namespace {
 
 Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
     Y_UNIT_TEST_TWIN(Upsert, LogEnabled) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
 
             if (LogEnabled) {
@@ -78,15 +78,15 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
              LogEnabled ? 1 : 0},
         };
 
-        CheckRegexMatch(ss.Str(), regexToMatchCount);
+        CheckRegexMatch(ss.Snapshot(), regexToMatchCount);
     }
 
     Y_UNIT_TEST_TWIN(UpsertEvWriteQueryService, isOlap) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
             serverSettings.AppConfig.MutableTableServiceConfig()->SetEnableOlapSink(isOlap);
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
             kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::DATA_INTEGRITY, NLog::PRI_TRACE);
 
@@ -136,14 +136,14 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
             // ColumnShard doesn't have integrity logs.
         }
 
-        CheckRegexMatch(ss.Str(), regexToMatchCount);
+        CheckRegexMatch(ss.Snapshot(), regexToMatchCount);
     }
 
     Y_UNIT_TEST(Ddl) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
             kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::DATA_INTEGRITY, NLog::PRI_TRACE);
             auto db = kikimr.GetTableClient();
@@ -168,14 +168,14 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
             {ConstructRegexToCheckLogs("INFO", "DataShard"), 0},
         };
 
-        CheckRegexMatch(ss.Str(), regexToMatchCount);
+        CheckRegexMatch(ss.Snapshot(), regexToMatchCount);
     }
 
     Y_UNIT_TEST(Select) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
             kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::DATA_INTEGRITY, NLog::PRI_TRACE);
             auto db = kikimr.GetTableClient();
@@ -202,14 +202,14 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
             {ConstructRegexToCheckLogs("INFO", "DataShard"), 0},
         };
 
-        CheckRegexMatch(ss.Str(), regexToMatchCount);
+        CheckRegexMatch(ss.Snapshot(), regexToMatchCount);
     }
 
     Y_UNIT_TEST(BrokenReadLock) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
             kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::DATA_INTEGRITY, NLog::PRI_TRACE);
             auto db = kikimr.GetTableClient();
@@ -248,7 +248,7 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
             }
         }
 
-        auto logRows = SplitString(ss.Str(), "DATA_INTEGRITY");
+        auto logRows = SplitString(ss.Snapshot(), "DATA_INTEGRITY");
         std::string readLock;
         std::string brokenLock;
         for (const auto& row : logRows) {
@@ -273,10 +273,10 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
     }
 
     Y_UNIT_TEST(BrokenReadLockAbortedTx) {
-        TStringStream ss;
+        TCapturedLog ss;
         {
             TKikimrSettings serverSettings;
-            serverSettings.LogStream = &ss;
+            serverSettings.LogCapture = ss;
             TKikimrRunner kikimr(serverSettings);
             kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::DATA_INTEGRITY, NLog::PRI_TRACE);
             auto db = kikimr.GetTableClient();
@@ -321,7 +321,7 @@ Y_UNIT_TEST_SUITE(KqpDataIntegrityTrails) {
         }
 
         // Verify that the abort was logged correctly
-        auto logRows = SplitString(ss.Str(), "DATA_INTEGRITY");
+        auto logRows = SplitString(ss.Snapshot(), "DATA_INTEGRITY");
         bool foundAbortLog = false;
         bool foundInputActorResult = false;
         for (const auto& row : logRows) {

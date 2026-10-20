@@ -9,6 +9,8 @@
 #include <ydb/core/kqp/common/events/events.h>
 #include <ydb/core/kqp/common/kqp_user_request_context.h>
 
+#include <util/system/mutex.h>
+
 namespace NKikimr {
 namespace NKqp {
 
