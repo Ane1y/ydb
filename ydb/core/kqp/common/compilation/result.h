@@ -58,7 +58,7 @@ struct TKqpCompileResult {
 
     ETableReadType MaxReadType;
     bool AllowCache = true;
-    TOptimizerCacheOutput CacheOutput;
+    TPreCboSnapshotPtr CacheSnapshot;
     bool UsedNewRbo = false;
     TMaybe<TQueryAst> QueryAst;
     bool NeedToSplit = false;

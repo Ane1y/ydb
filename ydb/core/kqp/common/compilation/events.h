@@ -144,6 +144,8 @@ struct TEvCompileResponse: public TEventLocal<TEvCompileResponse, TKqpEvents::Ev
     }
 
     TKqpCompileResult::TConstPtr CompileResult;
+    // Publication payload for the compile service; must not be retained by the query cache.
+    TPeepholeResults NewPeephole;
     TKqpStatsCompile Stats;
     std::optional<TString> ReplayMessage;
 

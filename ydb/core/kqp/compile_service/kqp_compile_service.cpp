@@ -774,7 +774,7 @@ private:
                             {"requestGeneration", compileRequest.ConfigGeneration},
                             {"currentGeneration", ConfigGeneration});
                     } else {
-                        PublishCompileResult(ctx, compileRequest, compileResult, keepInCache, isPerStatementExecution);
+                        PublishCompileResult(ctx, compileRequest, compileResult, ev->Get()->NewPeephole, keepInCache, isPerStatementExecution);
                     }
                 }
 
@@ -853,16 +853,15 @@ private:
     }
 
     void PublishCompileResult(const TActorContext& ctx, const TKqpCompileRequest& compileRequest,
-        const TKqpCompileResult::TConstPtr& compileResult, bool keepInCache, bool isPerStatementExecution)
+        const TKqpCompileResult::TConstPtr& compileResult, TPeepholeResults& newPeephole, bool keepInCache, bool isPerStatementExecution)
     {
         UpdateQueryCache(ctx, compileResult, keepInCache, compileRequest.CompileSettings.IsQueryActionPrepare,
             isPerStatementExecution, compileRequest.CompileSettings.IsWarmupCompilation);
 
-        const auto& cacheOutput = compileResult->CacheOutput;
         if (CompileCacheRegistry && keepInCache) {
-            for (const auto& [key, result] : cacheOutput.NewPeephole) {
+            for (auto& [key, result] : newPeephole) {
                 if (result) {
-                    CompileCacheRegistry->Peephole().Insert(key, result);
+                    CompileCacheRegistry->Peephole().Insert(key, std::move(result));
                 }
             }
         }

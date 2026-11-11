@@ -552,6 +552,7 @@ private:
             KqpCompileResult->ReplayMessageUserView = std::move(*ReplayMessageUserView);
         }
         auto responseEv = MakeHolder<TEvKqp::TEvCompileResponse>(KqpCompileResult);
+        responseEv->NewPeephole = std::move(NewPeephole);
 
         responseEv->ReplayMessage = std::move(ReplayMessage);
         ReplayMessage = std::nullopt;
@@ -716,7 +717,8 @@ private:
         KqpCompileResult = TKqpCompileResult::Make(Uid, status, CollectIssues(kqpResult.Issues()), maxReadType, CompileCpuTime, std::move(QueryId), std::move(QueryAst), meta);
         KqpCompileResult->UsedNewRbo = EnableNewRBO;
         KqpCompileResult->CommandTagName = kqpResult.CommandTagName;
-        KqpCompileResult->CacheOutput = std::move(kqpResult.CacheOutput);
+        KqpCompileResult->CacheSnapshot = std::move(kqpResult.CacheOutput.CacheSnapshot);
+        NewPeephole = std::move(kqpResult.CacheOutput.NewPeephole);
 
         if (status == Ydb::StatusIds::SUCCESS) {
             YQL_ENSURE(kqpResult.PreparingQuery);
@@ -861,6 +863,7 @@ private:
     TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncCompileResult;
     TIntrusivePtr<IKqpHost::IAsyncSplitResult> AsyncSplitResult;
     std::shared_ptr<TKqpCompileResult> KqpCompileResult;
+    TPeepholeResults NewPeephole;
     std::optional<TString> ReplayMessage;  // here metadata is encoded protobuf - for logs
     std::optional<TString> ReplayMessageUserView;  // here metadata is part of json - full readable json for diagnostics
 

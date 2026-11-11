@@ -32,6 +32,7 @@ using TPeepholeResultPtr = std::shared_ptr<const TPeepholeResult>;
 
 // Placeholder: an opaque string built by the optimizer. TString because that is what the optimizer builds.
 using TPeepholeKey = TString;
+using TPeepholeResults = std::unordered_map<TPeepholeKey, TPeepholeResultPtr>;
 
 // Thread-safe. nullptr on miss; a returned result stays valid regardless of later eviction.
 struct IPeepholeLookup {
@@ -49,7 +50,7 @@ struct TOptimizerInput {
 struct TOptimizerCacheOutput {
     // Set: KQP keeps the snapshot instead of the compiled plan. Null: as today.
     TPreCboSnapshotPtr CacheSnapshot;
-    std::unordered_map<TPeepholeKey, TPeepholeResultPtr> NewPeephole;
+    TPeepholeResults NewPeephole;
 
     void Clear() {
         CacheSnapshot.reset();
