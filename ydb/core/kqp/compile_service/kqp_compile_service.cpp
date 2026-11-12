@@ -1227,55 +1227,69 @@ bool TKqpQueryCache::Insert(
     bool isEnableAstCache,
     bool isPerStatementExecution)
 {
+    Y_ENSURE(compileResult->Query);
+    YQL_ENSURE(compileResult->PreparedQuery);
+
     TGuard<TAdaptiveLock> guard(Lock);
 
-    auto ts = TInstant::Now();
+    const TString& uid = compileResult->Uid;
+    const auto& query = *compileResult->Query;
+
+    size_t dropped = 0;
     if (!isPerStatementExecution) {
-        InsertQuery(compileResult);
+        // One entry per query text: a new UID for the same text replaces the old entry.
+        if (const TString* oldUid = QueryIndex.Get(query); oldUid && *oldUid != uid) {
+            dropped += EraseLocked(TString(*oldUid));
+        }
+    }
+    dropped += InsertLocked(uid, MakeIntrusive<TKqpQueryCacheEntry>(compileResult));
+    if (!isPerStatementExecution) {
+        QueryIndex.Set(query, uid);
     }
     if (isEnableAstCache && compileResult->GetAst()) {
-        InsertAst(compileResult);
+        AstIndex.Set(GetQueryIdWithAst(query, *compileResult->GetAst()), uid);
     }
 
-    auto it = Index.emplace(compileResult->Uid, TCacheEntry{compileResult, TAppData::TimeProvider->Now() + Ttl});
-    Y_ABORT_UNLESS(it.second);
+    Snapshot.Insert(uid, compileResult, Now());
+    IncBytes(compileResult->PreparedQuery->ByteSize());
 
-    TItem* item = &const_cast<TItem&>(*it.first);
-    auto removedItem = List.Insert(item);
+    return dropped != 0;
+}
 
-    Snapshot.Insert(compileResult->Uid, item->Value.CompileResult, ts);
-    IncBytes(item->Value.CompileResult->PreparedQuery->ByteSize());
+void TKqpQueryCache::OnDropped(const TEvicted& evicted) {
+    const auto& entry = evicted.Value;
+    Y_ABORT_UNLESS(entry && entry->CompileResult && entry->CompileResult->Query);
+    const auto& compileResult = entry->CompileResult;
 
-    if (removedItem) {
-        DecBytes(removedItem->Value.CompileResult->PreparedQuery->ByteSize());
-
-        Snapshot.Erase(removedItem->Value.CompileResult->Uid);
-        auto queryId = *removedItem->Value.CompileResult->Query;
-        QueryIndex.erase(queryId);
-        if (removedItem->Value.CompileResult->GetAst()) {
-            AstIndex.erase(GetQueryIdWithAst(queryId, *removedItem->Value.CompileResult->GetAst()));
-        }
-        auto indexIt = Index.find(*removedItem);
-        if (indexIt != Index.end()) {
-            Index.erase(indexIt);
-        }
+    DecBytes(compileResult->PreparedQuery->ByteSize());
+    DecBytes(entry->ReplayMessage.size());
+    Snapshot.Erase(evicted.Key);
+    QueryIndex.Forget(*compileResult->Query, evicted.Key);
+    if (compileResult->GetAst()) {
+        AstIndex.Forget(GetQueryIdWithAst(*compileResult->Query, *compileResult->GetAst()), evicted.Key);
     }
+}
 
-    Y_ABORT_UNLESS(List.GetSize() == Index.size());
-
-    return removedItem != nullptr;
+void TKqpQueryCache::OnCleared() {
+    QueryIndex.Clear();
+    AstIndex.Clear();
+    ByteSize = 0;
+    Snapshot.Clear();
+    WarmupPendingHitUids.clear();
+    WarmupWindowStart = TInstant::Zero();
+    WarmupWindowOpened = false;
+    AtomicSet(WarmupWindowClosedAtomic, 0);
+    AtomicSet(WarmupHasPendingAtomic, 0);
 }
 
 void TKqpQueryCache::AttachReplayMessage(const TString uid, TString replayMessage) {
     TGuard<TAdaptiveLock> guard(Lock);
 
-    auto it = Index.find(TItem(uid));
-    if (it != Index.end()) {
-        TItem* item = &const_cast<TItem&>(*it);
-        DecBytes(item->Value.ReplayMessage.size());
-        item->Value.ReplayMessage = replayMessage;
-        auto ts = TInstant::Now();
-        item->Value.LastReplayTime = ts;
+    if (auto entry = FindLocked(uid, false)) {
+        DecBytes(entry->ReplayMessage.size());
+        entry->ReplayMessage = replayMessage;
+        auto ts = Now();
+        entry->LastReplayTime = ts;
         Snapshot.Touch(uid, ts);
         IncBytes(replayMessage.size());
     }
@@ -1284,82 +1298,44 @@ void TKqpQueryCache::AttachReplayMessage(const TString uid, TString replayMessag
 TString TKqpQueryCache::ReplayMessageByUid(const TString uid, TDuration timeout) {
     TGuard<TAdaptiveLock> guard(Lock);
 
-    auto it = Index.find(TItem(uid));
-    if (it != Index.end()) {
-        TInstant& lastReplayTime = const_cast<TItem&>(*it).Value.LastReplayTime;
-        TInstant now = TInstant::Now();
-        if (lastReplayTime + timeout < now) {
-            lastReplayTime = now;
+    if (auto entry = FindLocked(uid, false)) {
+        TInstant now = Now();
+        if (entry->LastReplayTime + timeout < now) {
+            entry->LastReplayTime = now;
             Snapshot.Touch(uid, now);
-            return it->Value.ReplayMessage;
+            return entry->ReplayMessage;
         }
     }
     return "";
 }
 
 TKqpCompileResult::TConstPtr TKqpQueryCache::FindByUidImpl(const TString& uid, bool promote) {
-    auto it = Index.find(TItem(uid));
-    if (it != Index.end()) {
-        TItem* item = &const_cast<TItem&>(*it);
-        if (promote) {
-            auto ts = TAppData::TimeProvider->Now();
-            item->Value.ExpiredAt = ts + Ttl;
-            List.Promote(item);
-            Snapshot.Touch(uid, ts);
-        }
-
-        return item->Value.CompileResult;
+    auto entry = FindLocked(uid, promote);
+    if (!entry) {
+        return nullptr;
     }
-
-    return nullptr;
+    if (promote) {
+        Snapshot.Touch(uid, Now());
+    }
+    return entry->CompileResult;
 }
 
 TKqpCompileResult::TConstPtr TKqpQueryCache::FindByQueryImpl(const TKqpQueryId& query, bool promote) {
-    auto uid = QueryIndex.FindPtr(query);
-    if (!uid) {
-        return nullptr;
-    }
-
-    // we're holding read and assume it's recursive
-    return FindByUidImpl(*uid, promote);
+    const TString* uid = QueryIndex.Get(query);
+    return uid ? FindByUidImpl(*uid, promote) : nullptr;
 }
 
 bool TKqpQueryCache::EraseByUidImpl(const TString& uid) {
-    auto it = Index.find(TItem(uid));
-    if (it == Index.end()) {
-        return false;
-    }
-
-    TItem* item = &const_cast<TItem&>(*it);
-    List.Erase(item);
-
-    DecBytes(item->Value.CompileResult->PreparedQuery->ByteSize());
-    DecBytes(item->Value.ReplayMessage.size());
-
-    Y_ABORT_UNLESS(item->Value.CompileResult);
-    Snapshot.Erase(uid);
-    Y_ABORT_UNLESS(item->Value.CompileResult->Query);
-    auto queryId = *item->Value.CompileResult->Query;
-    QueryIndex.erase(queryId);
-    if (item->Value.CompileResult->GetAst()) {
-        AstIndex.erase(GetQueryIdWithAst(queryId, *item->Value.CompileResult->GetAst()));
-    }
-
-    Index.erase(it);
-
-    Y_ABORT_UNLESS(List.GetSize() == Index.size());
-    return true;
+    return EraseLocked(uid);
 }
 
 void TKqpQueryCache::Replace(const TKqpCompileResult::TConstPtr& compileResult) {
     TGuard<TAdaptiveLock> guard(Lock);
 
-    auto it = Index.find(TItem(compileResult->Uid));
-    if (it != Index.end()) {
-        TItem& item = const_cast<TItem&>(*it);
-        Snapshot.Erase(item.Value.CompileResult->Uid);
-        item.Value.CompileResult = compileResult;
-        Snapshot.Insert(compileResult->Uid, compileResult, TInstant::Now());
+    if (auto entry = FindLocked(compileResult->Uid, false)) {
+        Snapshot.Erase(entry->CompileResult->Uid);
+        entry->CompileResult = compileResult;
+        Snapshot.Insert(compileResult->Uid, compileResult, Now());
     }
 }
 
@@ -1519,7 +1495,7 @@ TKqpCompileResult::TConstPtr TKqpQueryCache::FindByAst(
 {
     TGuard<TAdaptiveLock> guard(Lock);
 
-    auto uid = AstIndex.FindPtr(GetQueryIdWithAst(query, ast));
+    const TString* uid = AstIndex.Get(GetQueryIdWithAst(query, ast));
     if (!uid) {
         return nullptr;
     }
@@ -1539,33 +1515,11 @@ TVector<TKqpQueryCacheSnapshot::TEntry> TKqpQueryCache::GetSnapshot() const {
 }
 
 size_t TKqpQueryCache::EraseExpiredQueries() {
-    TGuard<TAdaptiveLock> guard(Lock);
-
-    auto prevSize = SizeImpl();
-
-    auto now = TAppData::TimeProvider->Now();
-    while (List.GetSize() && List.GetOldest()->Value.ExpiredAt <= now) {
-        EraseByUidImpl(List.GetOldest()->Key);
-    }
-
-    Y_ABORT_UNLESS(List.GetSize() == Index.size());
-    return prevSize - SizeImpl();
+    return TBase::EraseExpired();
 }
 
 void TKqpQueryCache::Clear() {
-    TGuard<TAdaptiveLock> guard(Lock);
-
-    List = TList(List.GetMaxSize());
-    Index.clear();
-    QueryIndex.clear();
-    AstIndex.clear();
-    ByteSize = 0;
-    Snapshot.Clear();
-    WarmupPendingHitUids.clear();
-    WarmupWindowStart = TInstant::Zero();
-    WarmupWindowOpened = false;
-    AtomicSet(WarmupWindowClosedAtomic, 0);
-    AtomicSet(WarmupHasPendingAtomic, 0);
+    TBase::Clear();
 }
 
 void TKqpQueryCache::MarkWarmupInsert(const TString& uid) {
@@ -1599,20 +1553,6 @@ bool TKqpQueryCache::RefreshWarmupWindowStateImpl() {
         return false;
     }
     return true;
-}
-
-void TKqpQueryCache::InsertQuery(const TKqpCompileResult::TConstPtr& compileResult) {
-    Y_ENSURE(compileResult->Query);
-    auto& query = *compileResult->Query;
-
-    YQL_ENSURE(compileResult->PreparedQuery);
-
-    auto queryIt = QueryIndex.emplace(query, compileResult->Uid);
-    if (!queryIt.second) {
-        EraseByUidImpl(compileResult->Uid);
-        QueryIndex.erase(query);
-    }
-    Y_ENSURE(queryIt.second);
 }
 
 TKqpQueryId TKqpQueryCache::GetQueryIdWithAst(const TKqpQueryId& query, const NYql::TAstParseResult& ast) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ydb/core/kqp/common/kqp.h>
+#include <ydb/core/kqp/common/compile_cache/kqp_cache.h>
 #include <ydb/core/kqp/common/simple/temp_tables.h>
 #include <ydb/core/kqp/gateway/kqp_gateway.h>
 #include <ydb/core/kqp/federated_query/kqp_federated_query_helpers.h>
@@ -71,19 +72,43 @@ private:
     THashMap<TString, ui32> Index_;
 };
 
+// Mutable only under the cache lock.
+struct TKqpQueryCacheEntry : public TThrRefBase {
+    explicit TKqpQueryCacheEntry(TKqpCompileResult::TConstPtr compileResult)
+        : CompileResult(std::move(compileResult))
+    {}
+
+    TKqpCompileResult::TConstPtr CompileResult;
+    TString ReplayMessage;
+    TInstant LastReplayTime = TInstant::Zero();
+};
+
+using TKqpQueryCacheEntryPtr = TIntrusivePtr<TKqpQueryCacheEntry>;
+
+struct TKqpQueryCacheCountSize {
+    static size_t Size(const TKqpQueryCacheEntryPtr&) { return 1; }  // the limit is a number of entries
+};
+
 // Cache is shared between query sessions, compile service and kqp proxy.
 // Currently we don't use RW lock, because of cache promotions during lookup:
 // in benchmark both versions (RW spinlock and adaptive W spinlock) show same
 // performance. Might consider RW lock again in future.
-class TKqpQueryCache: public TThrRefBase {
+class TKqpQueryCache
+    : public TThrRefBase
+    , private TKqpCache<TKqpQueryCache, TString, TKqpQueryCacheEntryPtr, TKqpQueryCacheCountSize>
+{
+    using TBase = TKqpCache<TKqpQueryCache, TString, TKqpQueryCacheEntryPtr, TKqpQueryCacheCountSize>;
+    using TEvicted = TBase::TEvicted;
+    friend TBase;
+
 public:
     // Opens lazily on first non-warmup access with non-empty pending set,
     // closes once after the duration (no timer, checked on access).
     static constexpr TDuration WarmupObservationWindow = TDuration::Minutes(5);
 
     TKqpQueryCache(size_t size, TDuration ttl)
-        : List(size)
-        , Ttl(ttl) {}
+        : TBase(size, ttl)
+    {}
 
     bool Insert(const TKqpCompileResult::TConstPtr& compileResult, bool isEnableAstCache, bool isPerStatementExecution);
 
@@ -155,21 +180,20 @@ public:
     void Clear();
 
 private:
+    static TInstant Now() {
+        return TAppData::TimeProvider->Now();
+    }
+
+    // TKqpCache hooks, called under Lock for every entry that leaves the storage.
+    void OnDropped(const TEvicted& evicted);
+    void OnCleared();
+
     TKqpCompileResult::TConstPtr FindByUidImpl(const TString& uid, bool promote);
     TKqpCompileResult::TConstPtr FindByQueryImpl(const TKqpQueryId& query, bool promote);
     bool EraseByUidImpl(const TString& uid);
 
     size_t SizeImpl() const {
-        return Index.size();
-    }
-
-    void InsertQuery(const TKqpCompileResult::TConstPtr& compileResult);
-
-    void InsertAst(const TKqpCompileResult::TConstPtr& compileResult) {
-        Y_ENSURE(compileResult->Query);
-        Y_ENSURE(compileResult->GetAst());
-
-        AstIndex.emplace(GetQueryIdWithAst(*compileResult->Query, *compileResult->GetAst()), compileResult->Uid);
+        return Storage.Size();
     }
 
     TKqpQueryId GetQueryIdWithAst(const TKqpQueryId& query, const NYql::TAstParseResult& ast);
@@ -187,26 +211,11 @@ private:
     }
 
 private:
-    struct TCacheEntry {
-        TKqpCompileResult::TConstPtr CompileResult;
-        TInstant ExpiredAt;
-        TString ReplayMessage = "";
-        TInstant LastReplayTime = TInstant::Zero();
-    };
-
-    using TList = TLRUList<TString, TCacheEntry>;
-    using TItem = TList::TItem;
-
-private:
-    TList List;
-    THashSet<TItem, TItem::THash> Index;
-    THashMap<TKqpQueryId, TString, THash<TKqpQueryId>> QueryIndex;
-    THashMap<TKqpQueryId, TString, THash<TKqpQueryId>> AstIndex;
+    TSecondaryIndex<TKqpQueryId> QueryIndex;
+    TSecondaryIndex<TKqpQueryId> AstIndex;
     ui64 ByteSize = 0;
-    TDuration Ttl;
 
     TKqpQueryCacheSnapshot Snapshot;
-    TAdaptiveLock Lock;
 
     // Guarded by Lock (except the two atomics below).
     THashSet<TString> WarmupPendingHitUids;

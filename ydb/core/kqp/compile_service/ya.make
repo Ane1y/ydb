@@ -8,6 +8,7 @@ SRCS(
 )
 
 PEERDIR(
+    ydb/core/kqp/common/compile_cache
     ydb/core/kqp/tracing
     ydb/core/actorlib_impl
     ydb/core/base
