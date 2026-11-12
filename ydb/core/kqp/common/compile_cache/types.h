@@ -7,8 +7,13 @@
 #include <memory>
 #include <unordered_map>
 
+// Contract between KQP and the optimizer for the compile cache. Leaf library: the optimizer
+// must not depend on compile_service, host, proxy or actors through it.
+
 namespace NKikimr::NKqp {
 
+// Opaque to KQP. Immutable once published and read by several compilations concurrently:
+// restoring from it must not touch it, including non-atomic ref counters of any graph inside.
 struct TPreCboSnapshot {
     virtual ~TPreCboSnapshot() = default;
     virtual ui64 ByteSize() const = 0;
@@ -16,6 +21,7 @@ struct TPreCboSnapshot {
     std::unordered_map<TPathId, ui64> SchemaVersions;   // every table, index and view the snapshot is bound to
 };
 
+// Opaque to KQP; same immutability and concurrency rules as TPreCboSnapshot.
 struct TPeepholeResult {
     virtual ~TPeepholeResult() = default;
     virtual ui64 ByteSize() const = 0;

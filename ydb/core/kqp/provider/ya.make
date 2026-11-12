@@ -28,6 +28,7 @@ SRCS(
 )
 
 PEERDIR(
+    ydb/core/kqp/common/compile_cache
     ydb/core/base
     ydb/core/docapi
     ydb/core/external_sources

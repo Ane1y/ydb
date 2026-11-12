@@ -10,6 +10,7 @@ SRCS(
 
 PEERDIR(
     library/cpp/cache
+    ydb/core/kqp/common/compile_cache
     library/cpp/protobuf/interop
     library/cpp/protobuf/json
     library/cpp/string_utils/quote

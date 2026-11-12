@@ -110,6 +110,7 @@ struct TKqpCompileRequest {
     std::shared_ptr<std::atomic<bool>> IntrestedInResult;
     TMaybe<TQueryAst> QueryAst;
 
+    TOptimizerInput OptimizerInput;
     std::shared_ptr<NYql::TExprContext> SplitCtx;
     NYql::TExprNode::TPtr SplitExpr;
 
@@ -267,9 +268,11 @@ public:
         const TKqpSettings::TConstPtr& kqpSettings,
         TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
         std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
-        std::optional<TKqpFederatedQuerySetup> federatedQuerySetup
+        std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
+        TKqpCompileCacheRegistryPtr compileCacheRegistry
         )
         : QueryCache(std::move(queryCache))
+        , CompileCacheRegistry(std::move(compileCacheRegistry))
         , TableServiceConfig(tableServiceConfig)
         , QueryServiceConfig(queryServiceConfig)
         , KqpSettings(kqpSettings)
@@ -500,6 +503,9 @@ private:
 
             QueryCache->Clear();
             ++ConfigGeneration;
+            if (CompileCacheRegistry) {
+                CompileCacheRegistry->Invalidate(ConfigGeneration);
+            }
         }
 
         TableServiceConfig.Swap(event.MutableConfig()->MutableTableServiceConfig());
@@ -768,7 +774,7 @@ private:
                             {"requestGeneration", compileRequest.ConfigGeneration},
                             {"currentGeneration", ConfigGeneration});
                     } else {
-                        UpdateQueryCache(ctx, compileResult, keepInCache, compileRequest.CompileSettings.IsQueryActionPrepare, isPerStatementExecution, compileRequest.CompileSettings.IsWarmupCompilation);
+                        PublishCompileResult(ctx, compileRequest, compileResult, keepInCache, isPerStatementExecution);
                     }
                 }
 
@@ -844,6 +850,22 @@ private:
         }
 
         StartCheckQueriesTtlTimer();
+    }
+
+    void PublishCompileResult(const TActorContext& ctx, const TKqpCompileRequest& compileRequest,
+        const TKqpCompileResult::TConstPtr& compileResult, bool keepInCache, bool isPerStatementExecution)
+    {
+        UpdateQueryCache(ctx, compileResult, keepInCache, compileRequest.CompileSettings.IsQueryActionPrepare,
+            isPerStatementExecution, compileRequest.CompileSettings.IsWarmupCompilation);
+
+        const auto& cacheOutput = compileResult->CacheOutput;
+        if (CompileCacheRegistry && keepInCache) {
+            for (const auto& [key, result] : cacheOutput.NewPeephole) {
+                if (result) {
+                    CompileCacheRegistry->Peephole().Insert(key, result);
+                }
+            }
+        }
     }
 
     void UpdateQueryCache(const TActorContext& ctx, TKqpCompileResult::TConstPtr compileResult, bool keepInCache, bool isQueryActionPrepare, bool isPerStatementExecution, bool isWarmupCompilation) {
@@ -1032,10 +1054,14 @@ private:
 
     void StartCompilation(TKqpCompileRequest&& request, const TActorContext& ctx) {
         request.WaitSpan.EndOk();
+        if (CompileCacheRegistry) {
+            request.OptimizerInput.PeepholeLookup = CompileCacheRegistry->MakePeepholeLookup(ConfigGeneration);
+        }
         auto compileActor = CreateKqpCompileActor(ctx.SelfID, KqpSettings, TableServiceConfig, PathNormalizer, QueryServiceConfig, ModuleResolverState, Counters,
             request.Uid, request.Query, request.UserToken, request.ClientAddress, FederatedQuerySetup, request.DbCounters, request.GUCSettings, request.ApplicationName, request.UserRequestContext,
             request.CompileServiceSpan.GetTraceId(), request.TempTablesState, request.CompileSettings.Action, std::move(request.QueryAst), request.CollectDiagnostics,
-            request.CompileSettings.PerStatementResult, request.SplitCtx, std::move(request.SplitExpr), request.UsePessimisticLocks);
+            request.CompileSettings.PerStatementResult, request.SplitCtx, std::move(request.SplitExpr), request.UsePessimisticLocks,
+            request.OptimizerInput);
         auto compileActorId = ctx.Register(compileActor, TMailboxType::HTSwap,
             AppData(ctx)->UserPoolId);
         request.WaitSpan = request.CompileServiceSpan.CreateChild(
@@ -1148,6 +1174,7 @@ private:
 
 private:
     TKqpQueryCachePtr QueryCache;
+    TKqpCompileCacheRegistryPtr CompileCacheRegistry;  // nullptr when EnableCompileCacheV2 is off
     EDatabaseType DatabaseType = EDatabaseType::Unknown;
     bool DatabaseTypeCheckScheduled = false;
     TDuration DatabaseTypeRetryDelay = TDuration::Seconds(1);
@@ -1597,12 +1624,13 @@ IActor* CreateKqpCompileService(
     const TTableServiceConfig& tableServiceConfig, const TQueryServiceConfig& queryServiceConfig,
     const TKqpSettings::TConstPtr& kqpSettings, TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
     std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
-    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup)
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
+    TKqpCompileCacheRegistryPtr compileCacheRegistry)
 {
     return new TKqpCompileService(
         std::move(queryCache),
         tableServiceConfig, queryServiceConfig, kqpSettings, moduleResolverState, counters,
-                                  std::move(queryReplayFactory), federatedQuerySetup);
+                                  std::move(queryReplayFactory), federatedQuerySetup, std::move(compileCacheRegistry));
 }
 
 } // namespace NKqp

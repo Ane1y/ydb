@@ -247,9 +247,15 @@ Y_UNIT_TEST_TWIN(PathAliasesInvalidateCompilationCache, AstCache) {
 
 // A compilation that was in flight during a cache-invalidating config change
 // must not land in the cleared cache: its result is compiled with the old config.
-Y_UNIT_TEST_TWIN(InFlightCompileResultDroppedFromCacheOnConfigChange, AstCache) {
+void InFlightCompileResultDroppedFromCacheOnConfigChange(bool astCache, bool compileCacheV2) {
     auto settings = TKikimrSettings().SetUseRealThreads(false).SetWithSampleTables(false);
-    settings.AppConfig.MutableTableServiceConfig()->SetEnableAstCache(AstCache);
+    settings.AppConfig.MutableTableServiceConfig()->SetEnableAstCache(astCache);
+    if (compileCacheV2) {
+        // The compile cache registry exists only with both flags on; the config change must
+        // invalidate it together with the query cache.
+        settings.AppConfig.MutableFeatureFlags()->SetEnableCompileCacheV2(true);
+        settings.AppConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+    }
     TKikimrRunner kikimr(settings);
     UNIT_ASSERT(kikimr.RunCall([&] { return kikimr.GetQueryClient().GetSession().GetValueSync().IsSuccess(); }));
     auto& runtime = *kikimr.GetTestServer().GetRuntime();
@@ -356,6 +362,14 @@ Y_UNIT_TEST_TWIN(InFlightCompileResultDroppedFromCacheOnConfigChange, AstCache) 
     receive(false);
     send(q3);
     receive(true);
+}
+
+Y_UNIT_TEST_TWIN(InFlightCompileResultDroppedFromCacheOnConfigChange, AstCache) {
+    InFlightCompileResultDroppedFromCacheOnConfigChange(AstCache, /*compileCacheV2=*/false);
+}
+
+Y_UNIT_TEST(InFlightCompileResultDroppedFromCacheOnConfigChangeCompileCacheV2) {
+    InFlightCompileResultDroppedFromCacheOnConfigChange(/*astCache=*/false, /*compileCacheV2=*/true);
 }
 
 auto GetYqlStreamIterator(

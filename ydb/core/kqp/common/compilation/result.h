@@ -4,6 +4,7 @@
 #include <util/digest/multi.h>
 #include <ydb/core/kqp/common/simple/query_ast.h>
 #include <ydb/core/kqp/common/simple/query_id.h>
+#include <ydb/core/kqp/common/compile_cache/types.h>
 #include <ydb/core/kqp/common/simple/helpers.h>
 #include <yql/essentials/public/issue/yql_issue.h>
 #include <yql/essentials/ast/yql_ast.h>
@@ -57,6 +58,7 @@ struct TKqpCompileResult {
 
     ETableReadType MaxReadType;
     bool AllowCache = true;
+    TOptimizerCacheOutput CacheOutput;
     bool UsedNewRbo = false;
     TMaybe<TQueryAst> QueryAst;
     bool NeedToSplit = false;

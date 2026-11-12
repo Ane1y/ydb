@@ -81,6 +81,16 @@ namespace NKikimr::NKqp {
 
 namespace {
 
+TKqpCompileCacheRegistryPtr MakeCompileCacheRegistry(const NKikimrConfig::TTableServiceConfig& config,
+    const NKikimrConfig::TFeatureFlags& featureFlags)
+{
+    if (!featureFlags.GetEnableCompileCacheV2() || !config.GetEnableNewRBO()) {
+        return nullptr;
+    }
+    TKqpCompileCacheRegistry::TSettings settings;
+    return MakeIntrusive<TKqpCompileCacheRegistry>(settings);
+}
+
 static constexpr TDuration DEFAULT_KEEP_ALIVE_TIMEOUT = TDuration::MilliSeconds(5000);
 static constexpr TDuration DEFAULT_EXTRA_TIMEOUT_WAIT = TDuration::MilliSeconds(50);
 static constexpr TDuration DEFAULT_CREATE_SESSION_TIMEOUT = TDuration::MilliSeconds(5000);
@@ -411,10 +421,12 @@ public:
         TActivationContext::ActorSystem()->RegisterLocalService(MakeKqpFinalizeScriptServiceId(SelfId().NodeId()), finalizeScriptService);
 
         // Create compile service
+        CompileCacheRegistry = MakeCompileCacheRegistry(TableServiceConfig, FeatureFlags);
         CompileService = TActivationContext::Register(CreateKqpCompileService(
             QueryCache,
             TableServiceConfig, QueryServiceConfig,
-            KqpSettings, ModuleResolverState, Counters, std::move(QueryReplayFactory), FederatedQuerySetup));
+            KqpSettings, ModuleResolverState, Counters, std::move(QueryReplayFactory), FederatedQuerySetup,
+            CompileCacheRegistry));
         TActivationContext::ActorSystem()->RegisterLocalService(
             MakeKqpCompileServiceID(SelfId().NodeId()), CompileService);
 
@@ -2449,6 +2461,7 @@ private:
     std::shared_ptr<NYql::NDq::IS3ActorsFactory> S3ActorsFactory;
 
     TKqpQueryCachePtr QueryCache;
+    TKqpCompileCacheRegistryPtr CompileCacheRegistry;  // nullptr when EnableCompileCacheV2 is off
 
     bool ServerWorkerBalancerComplete = false;
     bool WarmupStarted = false;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <ydb/core/kqp/common/kqp.h>
-#include <ydb/core/kqp/common/compile_cache/kqp_cache.h>
+#include <ydb/core/kqp/common/compile_cache/compile_cache_registry.h>
 #include <ydb/core/kqp/common/simple/temp_tables.h>
 #include <ydb/core/kqp/gateway/kqp_gateway.h>
 #include <ydb/core/kqp/federated_query/kqp_federated_query_helpers.h>
@@ -256,6 +256,7 @@ private:
 
 using TKqpQueryCachePtr = TIntrusivePtr<TKqpQueryCache>;
 
+
 bool HasTempTablesNameClashes(
     TKqpCompileResult::TConstPtr compileResult,
     TKqpTempTablesState::TConstPtr tempTablesState,
@@ -267,7 +268,8 @@ IActor* CreateKqpCompileService(
     const NKikimrConfig::TQueryServiceConfig& queryServiceConfig,
     const TKqpSettings::TConstPtr& kqpSettings, TIntrusivePtr<TModuleResolverState> moduleResolverState,
     TIntrusivePtr<TKqpCounters> counters, std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
-    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
+    TKqpCompileCacheRegistryPtr compileCacheRegistry = nullptr
     );
 
 IActor* CreateKqpCompileComputationPatternService(const NKikimrConfig::TTableServiceConfig& serviceConfig,
@@ -290,7 +292,8 @@ IActor* CreateKqpCompileActor(const TActorId& owner, const TKqpSettings::TConstP
     bool perStatementResult = false,
     std::shared_ptr<NYql::TExprContext> ctx = nullptr,
     NYql::TExprNode::TPtr expr = nullptr,
-    bool usePessimisticLocks = false);
+    bool usePessimisticLocks = false,
+    TOptimizerInput optimizerInput = {});
 
 IActor* CreateKqpCompileRequestActor(const TActorId& owner, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TMaybe<TString>& uid,
     TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters,
