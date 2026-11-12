@@ -859,11 +859,7 @@ private:
             isPerStatementExecution, compileRequest.CompileSettings.IsWarmupCompilation);
 
         if (CompileCacheRegistry && keepInCache) {
-            for (auto& [key, result] : newPeephole) {
-                if (result) {
-                    CompileCacheRegistry->Peephole().Insert(key, std::move(result));
-                }
-            }
+            CompileCacheRegistry->PublishPeephole(std::move(newPeephole));
         }
     }
 

@@ -82,6 +82,7 @@ Y_UNIT_TEST_SUITE(KqpQueryCache) {
 
         auto settings = TKikimrSettings().SetUseRealThreads(false).SetWithSampleTables(false);
         settings.AppConfig.MutableFeatureFlags()->SetEnableCompileCacheV2(true);
+        settings.AppConfig.MutableFeatureFlags()->SetEnableKqpPeepholeCache(true);
         settings.AppConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
         TKikimrRunner kikimr(settings);
         UNIT_ASSERT(kikimr.RunCall([&] { return kikimr.GetQueryClient().GetSession().GetValueSync().IsSuccess(); }));

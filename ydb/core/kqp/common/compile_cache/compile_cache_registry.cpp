@@ -28,8 +28,20 @@ private:
 // TKqpCompileCacheRegistry
 
 TKqpCompileCacheRegistry::TKqpCompileCacheRegistry(const TSettings& settings)
-    : PeepholeCache(settings.PeepholeMaxBytes, TDuration::Zero())
+    : PeepholeEnabled(settings.PeepholeEnabled)
+    , PeepholeCache(settings.PeepholeMaxBytes, TDuration::Zero())
 {}
+
+void TKqpCompileCacheRegistry::PublishPeephole(TPeepholeResults&& results) {
+    if (!PeepholeEnabled) {
+        return;
+    }
+    for (auto& [key, result] : results) {
+        if (result) {
+            PeepholeCache.Insert(key, std::move(result));
+        }
+    }
+}
 
 void TKqpCompileCacheRegistry::Invalidate(ui64 generation) {
     // Publish the generation first: in-flight lookups must start missing before the stores are emptied.
@@ -38,6 +50,9 @@ void TKqpCompileCacheRegistry::Invalidate(ui64 generation) {
 }
 
 IPeepholeLookupPtr TKqpCompileCacheRegistry::MakePeepholeLookup(ui64 generation) {
+    if (!PeepholeEnabled) {
+        return nullptr;
+    }
     return std::make_shared<TPeepholeLookup>(TKqpCompileCacheRegistryPtr(this), generation);
 }
 

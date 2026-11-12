@@ -88,6 +88,7 @@ TKqpCompileCacheRegistryPtr MakeCompileCacheRegistry(const NKikimrConfig::TTable
         return nullptr;
     }
     TKqpCompileCacheRegistry::TSettings settings;
+    settings.PeepholeEnabled = featureFlags.GetEnableKqpPeepholeCache();
     return MakeIntrusive<TKqpCompileCacheRegistry>(settings);
 }
 

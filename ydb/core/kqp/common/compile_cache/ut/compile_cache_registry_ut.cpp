@@ -44,13 +44,23 @@ Y_UNIT_TEST_SUITE(KqpCompileCacheRegistry) {
         UNIT_ASSERT_VALUES_EQUAL(cache.TotalSize(), 90);
     }
 
-    Y_UNIT_TEST(LookupMissesAfterInvalidate) {
-        auto registry = MakeIntrusive<TKqpCompileCacheRegistry>(TKqpCompileCacheRegistry::TSettings{});
-        registry->Peephole().Insert(MakeKey("p"), MakePeephole(1));
+    Y_UNIT_TEST(PeepholeFlagAndInvalidation) {
+        TPeepholeResults published;
+        published.emplace(MakeKey("p"), MakePeephole(1));
 
+        // Disabled: no lookup is handed out and publications are dropped.
+        auto disabled = MakeIntrusive<TKqpCompileCacheRegistry>(TKqpCompileCacheRegistry::TSettings{.PeepholeEnabled = false});
+        UNIT_ASSERT(!disabled->MakePeepholeLookup(disabled->CurrentGeneration()));
+        disabled->PublishPeephole(TPeepholeResults(published));
+        UNIT_ASSERT_VALUES_EQUAL(disabled->Peephole().Size(), 0);
+
+        // Enabled: a publication is visible to a lookup of the same generation ...
+        auto registry = MakeIntrusive<TKqpCompileCacheRegistry>(TKqpCompileCacheRegistry::TSettings{.PeepholeEnabled = true});
+        registry->PublishPeephole(std::move(published));
         auto lookup = registry->MakePeepholeLookup(registry->CurrentGeneration());
-        UNIT_ASSERT(lookup->Find(MakeKey("p")));
+        UNIT_ASSERT(lookup && lookup->Find(MakeKey("p")));
 
+        // ... and misses once the owner moves to the next generation.
         const ui64 before = registry->CurrentGeneration();
         registry->Invalidate(before + 1);
         UNIT_ASSERT_VALUES_EQUAL(registry->CurrentGeneration(), before + 1);
