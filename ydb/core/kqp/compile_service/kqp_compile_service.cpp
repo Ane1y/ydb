@@ -15,6 +15,7 @@
 #include <ydb/core/cms/console/events/configs_dispatcher.h>
 #include <ydb/core/kqp/counters/kqp_counters.h>
 #include <ydb/core/kqp/common/kqp_lwtrace_probes.h>
+#include <ydb/core/kqp/common/compile_cache/peephole_cache.h>
 #include <ydb/core/ydb_convert/ydb_convert.h>
 #include <ydb/library/aclib/aclib.h>
 #include <ydb/library/ydb_issue/issue_helpers.h>
@@ -120,6 +121,7 @@ struct TKqpCompileRequest {
     bool IsRecompile = false;
     bool BypassSnapshot = false;
     bool EnableSnapshots = false;
+    IPeepholeLookupPtr PeepholeLookup;
 
     bool HasTempTables() const { return TempTablesState && !TempTablesState->TempTables.empty(); }
 
@@ -315,13 +317,17 @@ public:
 
     void Bootstrap(const TActorContext& ctx) {
         PathNormalizer = AppData(ctx)->GetPathNormalizer();
+        const auto& flags = AppData(ctx)->FeatureFlags;
+        CompileCacheV2 = flags.GetEnableCompileCacheV2();
+        PeepholeEnabled = flags.GetEnableKqpPeepholeCache();
+        ConfigurePeepholeCache(false);
 
         QueryReplayBackend.Reset(CreateQueryReplayBackend(TableServiceConfig, Counters, QueryReplayFactory));
-        // Subscribe for TableService config changes
         ui32 tableServiceConfigKind = (ui32) NKikimrConsole::TConfigItem::TableServiceConfigItem;
         Send(NConsole::MakeConfigsDispatcherID(SelfId().NodeId()),
              new NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest(
-                 {tableServiceConfigKind, NKikimrConsole::TConfigItem::ResourcePathPrefixMappingItem}),
+                 {tableServiceConfigKind, NKikimrConsole::TConfigItem::ResourcePathPrefixMappingItem,
+                  NKikimrConsole::TConfigItem::FeatureFlagsItem}),
              IEventHandle::FlagTrackDelivery);
 
         Become(&TKqpCompileService::MainState);
@@ -515,6 +521,19 @@ private:
         Send(ev->Sender, response.release());
     }
 
+    void ConfigurePeepholeCache(bool invalidate) {
+        const bool enabled = CompileCacheV2 && TableServiceConfig.GetEnableNewRBO() && PeepholeEnabled;
+        if (enabled == bool(PeepholeCache) && !invalidate) {
+            return;
+        }
+        // In-flight optimizers keep a read-only handle to the retired, empty cache.
+        if (PeepholeCache) {
+            PeepholeCache->Clear();
+        }
+        constexpr size_t Budget = 64_MB;
+        PeepholeCache = enabled ? std::make_shared<TKqpPeepholeCache>(Budget) : nullptr;
+    }
+
     void HandleConfig(NConsole::TEvConsole::TEvConfigNotificationRequest::TPtr& ev) {
         auto &event = ev->Get()->Record;
         const bool aliasesChanged = ev->Get()->PathNormalizer.has_value()
@@ -523,7 +542,14 @@ private:
             PathNormalizer = *ev->Get()->PathNormalizer;
         }
 
-        auto diff = ShouldInvalidateCompileCache(TableServiceConfig, event.GetConfig().GetTableServiceConfig());
+        std::optional<TString> diff;
+        if (event.GetConfig().HasTableServiceConfig()) {
+            diff = ShouldInvalidateCompileCache(TableServiceConfig, event.GetConfig().GetTableServiceConfig());
+            TableServiceConfig.Swap(event.MutableConfig()->MutableTableServiceConfig());
+        }
+        if (event.GetConfig().HasFeatureFlags()) {
+            PeepholeEnabled = event.GetConfig().GetFeatureFlags().GetEnableKqpPeepholeCache();
+        }
         if (aliasesChanged || diff.has_value()) {
             YDB_LOG_NOTICE("Query cache was invalidated due to config change, config change differencer",
                 {"output", diff.value_or("path aliases changed")});
@@ -532,7 +558,7 @@ private:
             ++ConfigGeneration;
         }
 
-        TableServiceConfig.Swap(event.MutableConfig()->MutableTableServiceConfig());
+        ConfigurePeepholeCache(aliasesChanged || diff.has_value());
         YDB_LOG_INFO_CTX(*TlsActivationContext, "Updated config");
 
         auto responseEv = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationResponse>(event);
@@ -868,6 +894,11 @@ private:
                     }
                 }
 
+                if (keepInCache && !isStale && !hasTempTablesNameClashes && PeepholeCache
+                    && compileRequest.PeepholeLookup == PeepholeCache && compileResult->UsedNewRbo) {
+                    PeepholeCache->Publish(std::move(ev->Get()->CacheOutput.NewPeephole));
+                }
+
                 if (ev->Get()->ReplayMessage && !QueryReplayBackend->IsNull()) {
                     QueryReplayBackend->Collect(*ev->Get()->ReplayMessage);
                     if (!isStale && !compileRequest.BypassSnapshot && !skipRevalidationCacheUpdate) {
@@ -1080,6 +1111,10 @@ private:
             && !request.Query.Settings().IsAnalyze && request.CanShareCompilation()
             && (request.CompileSettings.KeepInCache || request.SourceSnapshot)
             && request.CompileSettings.Action == ECompileActorAction::COMPILE;
+        if (request.CanShareCompilation() && request.CompileSettings.Action == ECompileActorAction::COMPILE) {
+            request.PeepholeLookup = PeepholeCache;
+            optimizerInput.PeepholeLookup = request.PeepholeLookup;
+        }
         optimizerInput.EnableSnapshots = request.EnableSnapshots;
         if (request.EnableSnapshots && request.SourceSnapshot && !request.RevalidatePgCompatibility && request.SnapshotGeneration == ConfigGeneration) {
             optimizerInput.CacheSnapshot = request.SourceSnapshot->Snapshot;
@@ -1176,6 +1211,9 @@ private:
 
 private:
     TKqpQueryCachePtr QueryCache;
+    bool CompileCacheV2 = false;
+    bool PeepholeEnabled = false;
+    std::shared_ptr<TKqpPeepholeCache> PeepholeCache;
     EDatabaseType DatabaseType = EDatabaseType::Unknown;
     bool DatabaseTypeCheckScheduled = false;
     TDuration DatabaseTypeRetryDelay = TDuration::Seconds(1);

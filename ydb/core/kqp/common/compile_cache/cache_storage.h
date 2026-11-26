@@ -6,6 +6,8 @@
 #include <util/generic/hash_set.h>
 #include <util/generic/vector.h>
 
+#include <limits>
+
 namespace NKikimr::NKqp {
 
 // The owner holds the lock and destroys dropped values after unlocking.
@@ -19,9 +21,10 @@ public:
     };
     using TDropped = TVector<TEvicted>;
 
+    // Zero means unlimited. An oversized replacement leaves the old value available.
     TCacheStorage(size_t maxSize, TDuration ttl)
         : Ttl(ttl)
-        , List(maxSize)
+        , List(maxSize ? maxSize : std::numeric_limits<size_t>::max())
     {}
 
     TValue* Find(const TKey& key, bool promote, TInstant now, TDropped& dropped) {
@@ -48,10 +51,14 @@ public:
     }
 
     // Only removals due to capacity count as evictions.
-    size_t Insert(const TKey& key, TValue value, TInstant now, TDropped& dropped) {
+    template <typename T>
+    size_t Insert(const TKey& key, T&& value, TInstant now, TDropped& dropped) {
+        if (TWeight{}(value) > List.GetMaxSize()) {
+            return 0;
+        }
         Erase(key, dropped);
         const size_t before = dropped.size();
-        auto [it, inserted] = Index.emplace(key, TEntry{std::move(value), TouchTime(now)});
+        auto [it, inserted] = Index.emplace(key, TEntry{std::forward<T>(value), TouchTime(now)});
         Y_ABORT_UNLESS(inserted);
         for (auto* item = List.Insert(&Mutable(*it)); item; item = List.RemoveIfOverflown()) {
             dropped.push_back(Drop(Index.find(item->Key)));

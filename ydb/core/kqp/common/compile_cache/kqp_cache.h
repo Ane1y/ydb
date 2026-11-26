@@ -78,7 +78,7 @@ protected:
         return found;
     }
 
-    size_t InsertLocked(const TKey& key, TValue value, TInstant now, TDropped& dropped) {
+    size_t InsertLocked(const TKey& key, TValue&& value, TInstant now, TDropped& dropped) {
         const size_t before = dropped.size();
         const size_t evicted = Storage.Insert(key, std::move(value), now, dropped);
         Notify(before, dropped);

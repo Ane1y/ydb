@@ -1,4 +1,7 @@
 #include <ydb/core/kqp/ut/common/kqp_compile_cache_helpers.h>
+#include <ydb/core/kqp/ut/common/kqp_ut_common.h>
+#include <ydb/core/cms/console/events/console.h>
+#include <ydb/core/kqp/common/compilation/events.h>
 #include <ydb/core/kqp/compile_service/kqp_compile_service.h>
 #include <ydb/core/kqp/query_data/kqp_prepared_query.h>
 
@@ -168,6 +171,85 @@ struct TLookupFixture {
 } // namespace
 
 Y_UNIT_TEST_SUITE(KqpQueryCache) {
+
+    Y_UNIT_TEST(PeepholeCacheLifetimeAndFlags) {
+        struct TPeephole : TPeepholeResult {
+            ui64 ByteSize() const override { return 40ull << 20; }
+        };
+
+        auto settings = TKikimrSettings().SetUseRealThreads(false).SetWithSampleTables(false);
+        settings.AppConfig.MutableFeatureFlags()->SetEnableCompileCacheV2(true);
+        settings.AppConfig.MutableFeatureFlags()->SetEnableKqpPeepholeCache(true);
+        settings.AppConfig.MutableTableServiceConfig()->SetEnableNewRBO(true);
+        TKikimrRunner kikimr(settings);
+        UNIT_ASSERT(kikimr.RunCall([&] { return kikimr.GetQueryClient().GetSession().GetValueSync().IsSuccess(); }));
+        auto& runtime = *kikimr.GetTestServer().GetRuntime();
+        const auto edge = runtime.AllocateEdgeActor();
+        const auto service = MakeKqpCompileServiceID(runtime.GetNodeId(0));
+        const auto serviceActor = runtime.GetLocalServiceId(service);
+        TVector<std::weak_ptr<const TPeepholeResult>> peepholes;
+        const auto observer = runtime.AddObserver<TEvKqp::TEvCompileResponse>(
+            [&](TEvKqp::TEvCompileResponse::TPtr& ev) {
+                if (ev->Recipient == serviceActor) {
+                    auto result = std::make_shared<TPeephole>();
+                    peepholes.push_back(result);
+                    ev->Get()->CacheOutput.NewPeephole.emplace(ev->Get()->CompileResult->Uid, std::move(result));
+                }
+            });
+
+        auto compile = [&](const TString& text, bool keepInCache, bool fromCache) {
+            TMaybe<TKqpQueryId> query = TKqpQueryId(TString(DefaultKikimrPublicClusterName), "/Root", "", "root@builtin",
+                text, TKqpQuerySettings(NKikimrKqp::QUERY_TYPE_SQL_DML), nullptr, TGUCSettings());
+            TIntrusiveConstPtr<NACLib::TUserToken> token = new NACLib::TUserToken("root@builtin", {});
+            runtime.Send(new IEventHandle(service, edge, new TEvKqp::TEvCompileRequest(
+                token, "", Nothing(), std::move(query), keepInCache, false, TInstant::Max(), nullptr,
+                std::make_shared<TGUCSettings>(), Nothing(), std::make_shared<std::atomic<bool>>(true),
+                MakeIntrusive<TUserRequestContext>("peephole-lifetime", "/Root", "peephole-lifetime"))));
+            auto response = runtime.GrabEdgeEvent<TEvKqp::TEvCompileResponse>(edge, TDuration::Seconds(30));
+            UNIT_ASSERT(response && response->Get()->CompileResult);
+            UNIT_ASSERT_VALUES_EQUAL_C(response->Get()->CompileResult->Status, Ydb::StatusIds::SUCCESS,
+                response->Get()->CompileResult->Issues.ToString());
+            UNIT_ASSERT_VALUES_EQUAL(response->Get()->Stats.FromCache, fromCache);
+            return response->Get()->CompileResult;
+        };
+
+        // Two 40 MiB entries exceed the 64 MiB budget; the first plan remains cached and held by the caller.
+        auto first = compile("SELECT 1;", true, false);
+        UNIT_ASSERT_VALUES_EQUAL(peepholes.size(), 1);
+        UNIT_ASSERT(!peepholes[0].expired());
+        compile("SELECT 2;", true, false);
+        UNIT_ASSERT_VALUES_EQUAL(peepholes.size(), 2);
+        UNIT_ASSERT(peepholes[0].expired());
+        UNIT_ASSERT(!peepholes[1].expired());
+        UNIT_ASSERT_EQUAL(compile("SELECT 1;", true, true), first);
+
+        // A result rejected for caching releases its publication payload without evicting the live entry.
+        compile("SELECT 3;", false, false);
+        UNIT_ASSERT_VALUES_EQUAL(peepholes.size(), 3);
+        UNIT_ASSERT(peepholes[2].expired());
+        UNIT_ASSERT(!peepholes[1].expired());
+
+        auto reconfigure = [&](bool peephole) {
+            auto notification = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationRequest>();
+            *notification->Record.MutableConfig()->MutableFeatureFlags() = settings.AppConfig.GetFeatureFlags();
+            notification->Record.MutableConfig()->MutableFeatureFlags()->SetEnableKqpPeepholeCache(peephole);
+            runtime.Send(new IEventHandle(service, edge, notification.Release()));
+            UNIT_ASSERT(runtime.GrabEdgeEvent<NConsole::TEvConsole::TEvConfigNotificationResponse>(edge, TDuration::Seconds(30)));
+        };
+
+        // A feature-flags-only update retires the cache without resetting TableServiceConfig.
+        reconfigure(false);
+        UNIT_ASSERT(peepholes[1].expired());
+        compile("SELECT 4;", true, false);
+        UNIT_ASSERT_VALUES_EQUAL(peepholes.size(), 4);
+        UNIT_ASSERT(peepholes[3].expired());
+
+        // On again: publications are retained again.
+        reconfigure(true);
+        compile("SELECT 5;", true, false);
+        UNIT_ASSERT_VALUES_EQUAL(peepholes.size(), 5);
+        UNIT_ASSERT(!peepholes[4].expired());
+    }
 
     Y_UNIT_TEST_TWIN(EntriesAndIndexes, V2) {
         TClockFixture clock;

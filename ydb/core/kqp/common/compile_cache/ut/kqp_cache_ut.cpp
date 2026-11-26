@@ -57,9 +57,11 @@ Y_UNIT_TEST_SUITE(KqpCache) {
         UNIT_ASSERT_VALUES_EQUAL(cache.TotalWeight(), 9);
 
         const std::weak_ptr<int> token = held.Token;
-        UNIT_ASSERT_VALUES_EQUAL(cache.Insert(4, Sized(11)), 1);
-        UNIT_ASSERT_VALUES_EQUAL(cache.Dropped, 4);
-        UNIT_ASSERT_VALUES_EQUAL(cache.TotalWeight(), 11);
+        UNIT_ASSERT_VALUES_EQUAL(cache.Insert(4, Sized(11)), 0);
+        UNIT_ASSERT_VALUES_EQUAL(cache.Find(4, false).Bytes, 6);
+        UNIT_ASSERT_VALUES_EQUAL(cache.TotalWeight(), 9);
+        UNIT_ASSERT_VALUES_EQUAL(cache.Dropped, 2);
+        UNIT_ASSERT(cache.Erase(1));
         UNIT_ASSERT(!token.expired());
         held = {};
         UNIT_ASSERT(token.expired());
@@ -69,6 +71,14 @@ Y_UNIT_TEST_SUITE(KqpCache) {
         UNIT_ASSERT_VALUES_EQUAL(cache.TotalWeight(), 0);
         cache.Insert(1, Sized(6));
         UNIT_ASSERT_VALUES_EQUAL(cache.Insert(2, Sized(6)), 1);
+    }
+
+    Y_UNIT_TEST(ZeroBudgetIsUnlimited) {
+        TTestCache<TBytes> cache(0, TDuration::Zero());
+        cache.Insert(1, Sized(10));
+        cache.Insert(2, Sized(11));
+        UNIT_ASSERT_VALUES_EQUAL(cache.Size(), 2);
+        UNIT_ASSERT_VALUES_EQUAL(cache.TotalWeight(), 21);
     }
 
     Y_UNIT_TEST(CountLimitAndLazyExpiry) {
